@@ -1,0 +1,173 @@
+---
+# ── User ──────────────────────────────────────────────────────────────────────
+
+- name: Create ghrunner service user
+  ansible.builtin.user:
+    name: "{{ runner_user }}"
+    shell: /bin/bash
+    create_home: true
+    state: present
+  tags: [runner, user]
+
+- name: Add ghrunner to docker group
+  ansible.builtin.user:
+    name: "{{ runner_user }}"
+    groups: docker
+    append: true
+  tags: [runner, user]
+
+# ── Packages ──────────────────────────────────────────────────────────────────
+
+- name: Install AppArmor packages
+  ansible.builtin.apt:
+    name:
+      - apparmor
+      - apparmor-utils
+    state: present
+  tags: [runner, apparmor]
+
+# ── Repository ────────────────────────────────────────────────────────────────
+
+- name: Clone runner repository
+  ansible.builtin.git:
+    repo: "{{ runner_repo_url }}"
+    dest: "{{ runner_repo_dest }}"
+    version: "{{ runner_repo_version }}"
+    update: true
+  notify: Restart runner egress policy
+  become: true
+  become_user: "{{ runner_user }}"
+  when: not ansible_check_mode
+  tags: [runner, repo]
+
+# ── AppArmor ──────────────────────────────────────────────────────────────────
+
+- name: Install AppArmor profile
+  ansible.builtin.copy:
+    src: "{{ runner_repo_dest }}/apparmor/infra-runner"
+    dest: /etc/apparmor.d/infra-runner
+    owner: root
+    group: root
+    mode: "0644"
+    remote_src: true
+  notify: Reload AppArmor profile
+  when: not ansible_check_mode
+  tags: [runner, apparmor]
+
+# ── Runner egress policy ──────────────────────────────────────────────────────
+# The script owns dedicated chains and is idempotent. systemd reruns it after
+# Docker starts/restarts; iptables-persistent would remove UFW on Ubuntu.
+
+- name: Install runner egress policy service
+  ansible.builtin.template:
+    src: infra-runner-egress.service.j2
+    dest: /etc/systemd/system/infra-runner-egress.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart runner egress policy
+  tags: [runner, iptables]
+
+- name: Enable and start runner egress policy service
+  ansible.builtin.systemd_service:
+    name: infra-runner-egress.service
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+  tags: [runner, iptables]
+
+# ── Environment file ──────────────────────────────────────────────────────────
+
+- name: Ensure .ssh directory exists for {{ runner_user }}
+  ansible.builtin.file:
+    path: "/home/{{ runner_user }}/.ssh"
+    state: directory
+    owner: "{{ runner_user }}"
+    group: "{{ runner_user }}"
+    mode: "0700"
+  tags: [runner, env]
+
+- name: Deploy GitHub App private key
+  ansible.builtin.copy:
+    src: "{{ runner_github_app.key_path }}"
+    dest: "{{ runner_github_app_key_dest }}"
+    owner: "{{ runner_user }}"
+    group: root
+    mode: "0640"
+  no_log: true
+  tags: [runner, env]
+
+- name: Create runner .env on first installation
+  ansible.builtin.template:
+    src: runner.env.j2
+    dest: "{{ runner_repo_dest }}/.env"
+    owner: "{{ runner_user }}"
+    group: root
+    mode: "0640"
+    force: false
+  no_log: true
+  when: not ansible_check_mode
+  tags: [runner, env]
+
+- name: Keep runner .env readable by root-owned containers
+  ansible.builtin.file:
+    path: "{{ runner_repo_dest }}/.env"
+    owner: "{{ runner_user }}"
+    group: root
+    mode: "0640"
+  when: not ansible_check_mode
+  tags: [runner, env]
+
+- name: Update managed runner settings while preserving plugin variables
+  ansible.builtin.lineinfile:
+    path: "{{ runner_repo_dest }}/.env"
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    create: false
+  loop:
+    - {key: GITHUB_APP_ID, value: "{{ runner_github_app.app_id }}"}
+    - {key: GITHUB_APP_INSTALLATION_ID, value: "{{ runner_github_app.installation_id }}"}
+    - {key: GITHUB_APP_PRIVATE_KEY_PATH, value: /run/secrets/github_app_key}
+    - {key: GITHUB_APP_PRIVATE_KEY_HOST_PATH, value: "{{ runner_github_app_key_dest }}"}
+    - {key: GITHUB_ORG, value: "{{ runner_github_org }}"}
+    - {key: GITHUB_REPO, value: "{{ runner_github_repo }}"}
+    - {key: RUNNER_LABELS, value: "{{ runner_labels }}"}
+    - {key: DESIRED_IDLE, value: "{{ runner_desired_idle }}"}
+    - {key: RUNNER_MEMORY, value: "{{ runner_memory }}"}
+    - {key: RUNNER_CPUS, value: "{{ runner_cpus }}"}
+    - {key: RUNNER_KANIKO_SIZE, value: "{{ runner_kaniko_size }}"}
+    - {key: RUNNER_RUNTIME, value: "{{ runner_runtime }}"}
+    - {key: RUNNER_KATA_DNS, value: "{{ runner_kata_dns }}"}
+    - {key: RUNNER_APPARMOR_PROFILE, value: "{{ runner_apparmor_profile }}"}
+    - {key: RUNNER_SECCOMP_HOST_PATH, value: "{{ runner_repo_dest }}/seccomp/runner-profile.json"}
+    - {key: COMPOSE_PROJECT_NAME, value: "{{ runner_compose_project_name }}"}
+    - {key: POLL_INTERVAL, value: "{{ runner_poll_interval }}"}
+    - {key: HEALTH_PORT, value: "{{ runner_health_port }}"}
+    - {key: CONTROLLER_POLL_INTERVAL, value: "{{ runner_controller_poll_interval }}"}
+  no_log: true
+  when: not ansible_check_mode
+  tags: [runner, env]
+
+- name: Deploy docker-compose.override.yml (GitHub App key mount)
+  ansible.builtin.template:
+    src: docker-compose.override.yml.j2
+    dest: "{{ runner_repo_dest }}/docker-compose.override.yml"
+    owner: "{{ runner_user }}"
+    group: "{{ runner_user }}"
+    mode: "0644"
+  when: not ansible_check_mode
+  tags: [runner, env]
+
+
+# ── Firewall ──────────────────────────────────────────────────────────────────
+
+- name: Allow deployer health endpoint from WireGuard VPN only
+  community.general.ufw:
+    rule: allow
+    direction: in
+    proto: tcp
+    port: "{{ runner_health_port }}"
+    src: "{{ runner_vpn_subnet }}"
+    comment: runner health endpoint (VPN only)
+  tags: [runner, firewall]

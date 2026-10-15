@@ -1,0 +1,11 @@
+{
+{% if caddy_acme_email %}
+    email {{ caddy_acme_email }}
+{% endif %}
+    admin {{ caddy_admin_api }}
+{% if caddy_extra_global_options %}
+{{ caddy_extra_global_options | indent(4) }}
+{% endif %}
+}
+
+{{ caddy_sites_config }}

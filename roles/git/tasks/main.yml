@@ -1,0 +1,109 @@
+---
+- name: Ensure git is installed
+  ansible.builtin.package:
+    name: git
+    state: present
+  tags: [git, install]
+
+- name: Set GitHub CLI architecture fact (Debian)
+  ansible.builtin.set_fact:
+    _git_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [git, gh]
+
+- name: Download GitHub CLI GPG key (Debian)
+  ansible.builtin.get_url:
+    url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+    dest: /etc/apt/keyrings/githubcli-archive-keyring.gpg
+    mode: "0644"
+    force: false
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [git, gh]
+
+- name: Add GitHub CLI apt repository (Debian)
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ _git_arch }} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg]
+      https://cli.github.com/packages stable main
+    state: present
+    filename: github-cli
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [git, gh]
+
+- name: Install gh CLI
+  ansible.builtin.apt:
+    name: gh
+    state: present
+    update_cache: true
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [git, gh]
+
+- name: Generate GitHub App installation token
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sys, jwt, time, json
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        try:
+            import certifi, ssl
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            ctx = None
+        import urllib.request
+        with open(sys.argv[1], 'rb') as f:
+            key = load_pem_private_key(f.read(), password=None)
+        payload = {'iat': int(time.time()) - 60, 'exp': int(time.time()) + 600, 'iss': sys.argv[2]}
+        jwt_token = jwt.encode(payload, key, algorithm='RS256')
+        req = urllib.request.Request(
+            f'https://api.github.com/app/installations/{sys.argv[3]}/access_tokens',
+            method='POST',
+            headers={'Authorization': f'Bearer {jwt_token}', 'Accept': 'application/vnd.github+json'}
+        )
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=ctx) if ctx else urllib.request.HTTPSHandler()
+        )
+        with opener.open(req) as r:
+            print(json.loads(r.read())['token'], end='')
+      - "{{ git_github_app.key_path }}"
+      - "{{ git_github_app.app_id }}"
+      - "{{ git_github_app.installation_id }}"
+  register: _git_token_result
+  changed_when: false
+  become: false
+  no_log: true
+  delegate_to: localhost
+  when: git_github_app.app_id | default('') != ''
+  tags: [git, token]
+
+- name: Set GitHub App token fact
+  ansible.builtin.set_fact:
+    git_app_token: "{{ _git_token_result.stdout }}"
+  no_log: true
+  when: git_github_app.app_id | default('') != ''
+  tags: [git, token]
+
+- name: Deploy SSH keys for non-GitHub repos
+  ansible.builtin.copy:
+    content: "{{ item.key }}"
+    dest: "{{ item.path }}"
+    mode: "0600"
+    owner: "{{ item.owner | default(ansible_user) }}"
+  loop: "{{ git_deploy_keys }}"
+  no_log: true
+  tags: [git, keys]
+
+- name: Clone or update git repositories
+  ansible.builtin.git:
+    repo: "{{ item.repo }}"
+    dest: "{{ item.dest }}"
+    version: "{{ item.version | default('HEAD') }}"
+    key_file: "{{ item.key_file | default(git_default_key_file) | default(omit) }}"
+    accept_newhostkey: true
+    update: true
+  become: true
+  become_user: "{{ item.user | default(ansible_user) }}"
+  loop: "{{ git_repos }}"
+  no_log: true
+  tags: [git, repos]

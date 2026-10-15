@@ -1,0 +1,16 @@
+---
+filebrowser_version: "2.31.2"
+filebrowser_user: www-data
+filebrowser_port: 3001
+filebrowser_address: "0.0.0.0"
+filebrowser_data_dir: /var/lib/filebrowser
+filebrowser_root_dir: /data
+
+# Admin password — pull from external secrets manager, do not commit.
+# Example: "{{ lookup('community.general.onepassword', 'filebrowser-admin-password') }}"
+filebrowser_admin_password: "{{ lookup('env', 'FILEBROWSER_ADMIN_PASSWORD') }}"
+
+# Optional SHA-256 checksum for the downloaded tarball: "sha256:<hex>".
+# Find the value in checksums.txt on the GitHub release page for the chosen version.
+# Leave empty to skip verification.
+filebrowser_checksum: ""

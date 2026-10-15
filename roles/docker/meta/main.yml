@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  role_name: docker
+  platforms:
+    - name: Ubuntu
+      versions: ["22.04", "24.04"]
+    - name: EL
+      versions: ["9"]
+dependencies: []

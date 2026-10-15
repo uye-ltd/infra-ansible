@@ -1,0 +1,53 @@
+---
+- name: Read runner environment before edge rollback
+  ansible.builtin.slurp:
+    src: "{{ edge_runner_dir }}/.env"
+  register: edge_rollback_env
+  no_log: true
+
+- name: Remove only the edge overlay from Compose file list
+  ansible.builtin.set_fact:
+    edge_rollback_compose_file: >-
+      {{ (edge_rollback_env.content | b64decode
+          | regex_findall('(?m)^COMPOSE_FILE=(.+)$') | first
+          | default('docker-compose.yml:docker-compose.override.yml'))
+          .split(':') | reject('equalto', edge_legacy_overlay)
+          | reject('equalto', edge_overlay) | join(':') }}
+
+- name: Restore runner Compose file list
+  ansible.builtin.lineinfile:
+    path: "{{ edge_runner_dir }}/.env"
+    regexp: '^COMPOSE_FILE='
+    line: "COMPOSE_FILE={{ edge_rollback_compose_file }}"
+
+- name: Remove edge checkout mount setting
+  ansible.builtin.lineinfile:
+    path: "{{ edge_runner_dir }}/.env"
+    regexp: '^EDGE_COMPOSE_DIR='
+    state: absent
+
+- name: Restart deployer without the edge plugin
+  ansible.builtin.command:
+    argv: [docker, compose, up, -d, --no-deps, deployer]
+    chdir: "{{ edge_runner_dir }}"
+  become_user: "{{ edge_user }}"
+  become: true
+  changed_when: true
+
+- name: Stop edge container to release ports 80 and 443
+  ansible.builtin.command:
+    argv: [docker, stop, uye-edge]
+  register: edge_stop_result
+  failed_when: false
+  changed_when: edge_stop_result.rc == 0
+
+- name: Restore Caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    enabled: true
+    state: started
+
+- name: Clear active edge marker
+  ansible.builtin.file:
+    path: "{{ edge_active_marker }}"
+    state: absent

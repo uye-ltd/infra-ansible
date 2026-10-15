@@ -1,0 +1,6 @@
+---
+- name: Prepare infra-edge without changing live traffic
+  hosts: servers
+  become: true
+  roles:
+    - edge

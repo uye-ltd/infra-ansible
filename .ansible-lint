@@ -1,0 +1,11 @@
+---
+profile: production
+
+exclude_paths:
+  - .git/
+
+# Treat these as warnings rather than errors during initial development.
+warn_list:
+  - experimental
+
+skip_list: []

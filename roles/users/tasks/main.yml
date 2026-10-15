@@ -1,0 +1,36 @@
+---
+- name: Create groups
+  ansible.builtin.group:
+    name: "{{ item.name }}"
+    state: present
+  loop: "{{ users_groups }}"
+  tags: [users, groups]
+
+- name: Create user accounts
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: "{{ item.groups | default([]) }}"
+    append: true
+    shell: "{{ item.shell | default('/bin/bash') }}"
+    create_home: true
+    state: present
+  loop: "{{ users }}"
+  tags: [users]
+
+- name: Add authorized SSH keys
+  ansible.posix.authorized_key:
+    user: "{{ item.0.name }}"
+    key: "{{ item.1 }}"
+    state: present
+  loop: "{{ users | subelements('ssh_public_keys', skip_missing=True) }}"
+  tags: [users, ssh]
+
+- name: Grant sudo to privileged users
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ item.name }}"
+    content: "{{ item.name }} ALL=(ALL) NOPASSWD:ALL\n"
+    mode: "0440"
+    validate: visudo -cf %s
+  loop: "{{ users }}"
+  when: item.sudo | default(false)
+  tags: [users, sudo]

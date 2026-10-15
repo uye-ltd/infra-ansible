@@ -1,0 +1,36 @@
+---
+runner_user: ghrunner
+runner_repo_url: https://github.com/uye-ltd/infra-runner.git
+runner_repo_dest: "/home/{{ runner_user }}/infra-runner"
+runner_repo_version: main
+runner_image: ghcr.io/uye-ltd/infra-runner:verified
+
+# Explicit /24 job networks come from this range; match RUNNER_SUBNET_PREFIX
+runner_subnet: "10.89.0.0/16"
+
+# WireGuard VPN subnet — deployer health endpoint is restricted to this range
+runner_vpn_subnet: "10.0.0.0/24"
+
+# GitHub App credentials for GHCR login (reuses git_github_app by default)
+runner_github_app: "{{ git_github_app }}"
+
+# Where the GitHub App private key is stored on the remote host.
+# The key is copied from runner_github_app.key_path (local) to this path.
+runner_github_app_key_dest: "/home/{{ runner_user }}/.ssh/github-app.pem"
+
+# ── .env variables written to runner_repo_dest/.env ──────────────────────────
+runner_github_org: ""
+runner_github_token: ""
+runner_github_repo: infra-runner
+runner_labels: "self-hosted,linux,x64"
+runner_desired_idle: "2"
+runner_memory: "6g"
+runner_cpus: "2"
+runner_runtime: ""
+runner_kata_dns: "1.1.1.1"
+runner_kaniko_size: "2g"
+runner_apparmor_profile: "infra-runner"
+runner_poll_interval: "60"
+runner_controller_poll_interval: "15"
+runner_health_port: "8080"
+runner_compose_project_name: "infra-runner"

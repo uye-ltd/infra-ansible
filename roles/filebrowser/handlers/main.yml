@@ -1,0 +1,10 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart FileBrowser
+  ansible.builtin.service:
+    name: filebrowser
+    state: restarted
+  when: not ansible_check_mode

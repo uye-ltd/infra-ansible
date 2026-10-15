@@ -1,0 +1,11 @@
+---
+# List of groups to ensure exist before creating users.
+users_groups: []
+
+# List of user definitions. Example:
+# users:
+#   - name: alice
+#     groups: [sudo, docker]
+#     ssh_public_key: "ssh-ed25519 AAAA..."
+#     sudo: true
+users: []

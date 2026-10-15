@@ -1,0 +1,7 @@
+---
+- name: Configure storage mounts
+  hosts: servers
+  become: true
+  roles:
+    - role: storage
+      tags: storage

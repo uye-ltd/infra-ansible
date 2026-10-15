@@ -1,0 +1,51 @@
+---
+- name: Install ufw
+  ansible.builtin.package:
+    name: ufw
+    state: present
+  tags: [ufw]
+
+# In --check mode on a host that doesn't have ufw yet, the install above is only
+# simulated, so the ufw CLI is still missing and the tasks below (which shell out
+# to it) would fail. Probe for the binary and skip those tasks only in that case;
+# real runs (and check runs on already-provisioned hosts) proceed as normal.
+- name: Check whether the ufw binary is present
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: _ufw_bin
+  check_mode: false
+  tags: [ufw]
+
+- name: Set default incoming policy to deny
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+  when: _ufw_bin.stat.exists or not ansible_check_mode
+  notify: Reload ufw
+  tags: [ufw]
+
+- name: Set default outgoing policy to allow
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+  when: _ufw_bin.stat.exists or not ansible_check_mode
+  notify: Reload ufw
+  tags: [ufw]
+
+- name: Allow configured ports/services
+  community.general.ufw:
+    rule: "{{ item.rule | default('allow') }}"
+    port: "{{ item.port | default(omit) }}"
+    proto: "{{ item.proto | default('tcp') }}"
+    src: "{{ item.src | default(omit) }}"
+    comment: "{{ item.comment | default(omit) }}"
+  loop: "{{ ufw_rules }}"
+  when: _ufw_bin.stat.exists or not ansible_check_mode
+  notify: Reload ufw
+  tags: [ufw, rules]
+
+- name: Enable ufw
+  community.general.ufw:
+    state: enabled
+  when: _ufw_bin.stat.exists or not ansible_check_mode
+  tags: [ufw]

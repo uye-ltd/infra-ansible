@@ -1,0 +1,163 @@
+---
+- name: Assert required variables
+  ansible.builtin.assert:
+    that:
+      - caddy_acme_email | length > 0
+    fail_msg: "caddy_acme_email must be set for automatic ACME TLS"
+  tags: [caddy]
+
+- name: Ensure apt keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  tags: [caddy, install]
+
+- name: Download Caddy GPG key
+  ansible.builtin.get_url:
+    url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+    dest: /tmp/caddy-gpg.key
+    mode: "0644"
+  tags: [caddy, install]
+
+- name: Dearmor Caddy GPG key
+  ansible.builtin.command:
+    cmd: gpg --dearmor --output /etc/apt/keyrings/caddy-stable.gpg /tmp/caddy-gpg.key
+    creates: /etc/apt/keyrings/caddy-stable.gpg
+  tags: [caddy, install]
+
+- name: Add Caddy apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/caddy-stable.gpg]
+      https://dl.cloudsmith.io/public/caddy/stable/deb/debian
+      any-version main
+    filename: caddy-stable
+    state: present
+  register: _caddy_apt_repo
+  tags: [caddy, install]
+
+- name: Update apt cache after adding Caddy repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: _caddy_apt_repo is changed
+  tags: [caddy, install]
+
+- name: Install Caddy
+  ansible.builtin.apt:
+    name: caddy
+    state: present
+  tags: [caddy, install]
+
+- name: Check installed Caddy modules
+  ansible.builtin.command:
+    cmd: caddy list-modules
+  register: _caddy_modules
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  tags: [caddy, tls]
+
+- name: Install Cloudflare DNS plugin for Caddy
+  # NOTE: replaces /usr/bin/caddy with a plugin-enabled build from Caddy's
+  # download server. An `apt upgrade` of the caddy package reverts this — re-run
+  # this playbook after upgrading Caddy.
+  ansible.builtin.command:
+    cmd: caddy add-package github.com/caddy-dns/cloudflare
+  when: "'dns.providers.cloudflare' not in (_caddy_modules.stdout | default(''))"
+  changed_when: true
+  notify: Restart Caddy
+  tags: [caddy, tls]
+
+- name: Ensure caddy system user exists
+  ansible.builtin.user:
+    name: caddy
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/caddy
+    create_home: false
+    comment: Caddy web server
+  check_mode: false
+  tags: [caddy, install]
+
+- name: Ensure Caddy data directory exists
+  ansible.builtin.file:
+    path: /var/lib/caddy
+    state: directory
+    owner: caddy
+    group: caddy
+    mode: "0750"
+  tags: [caddy, install]
+
+- name: Ensure Caddy log directory exists
+  ansible.builtin.file:
+    path: "{{ caddy_log_dir }}"
+    state: directory
+    owner: caddy
+    group: caddy
+    mode: "0755"
+  tags: [caddy, config]
+
+- name: Deploy Caddy environment file (Cloudflare API token)
+  ansible.builtin.template:
+    src: caddy.env.j2
+    dest: "{{ caddy_config_dir }}/caddy.env"
+    owner: root
+    group: caddy
+    mode: "0640"
+  notify: Restart Caddy
+  tags: [caddy, config, tls]
+
+- name: Ensure Caddy systemd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/caddy.service.d
+    state: directory
+    mode: "0755"
+  tags: [caddy, config, tls]
+
+- name: Deploy Caddy systemd EnvironmentFile drop-in
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/caddy.service.d/override.conf
+    content: |
+      [Service]
+      EnvironmentFile={{ caddy_config_dir }}/caddy.env
+    mode: "0644"
+  register: _caddy_dropin
+  notify: Restart Caddy
+  tags: [caddy, config, tls]
+
+- name: Reload systemd after drop-in change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _caddy_dropin is changed and not ansible_check_mode
+  tags: [caddy, config, tls]
+
+- name: Deploy Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ caddy_config_dir }}/Caddyfile"
+    owner: root
+    group: caddy
+    mode: "0640"
+  notify: Reload Caddy
+  tags: [caddy, config]
+
+- name: Allow HTTP and HTTPS through UFW
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    comment: Caddy
+  loop:
+    - "80"
+    - "443"
+  when: caddy_open_firewall
+  tags: [caddy, firewall]
+
+- name: Enable and start Caddy
+  ansible.builtin.systemd:
+    name: caddy
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+  tags: [caddy]

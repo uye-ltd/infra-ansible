@@ -1,0 +1,20 @@
+---
+- name: Install dnsmasq
+  ansible.builtin.package:
+    name: dnsmasq
+    state: present
+
+- name: Deploy dnsmasq WireGuard config
+  ansible.builtin.template:
+    src: dnsmasq-wg.conf.j2
+    dest: /etc/dnsmasq.d/wireguard.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+
+- name: Enable and start dnsmasq
+  ansible.builtin.service:
+    name: dnsmasq
+    state: started
+    enabled: true

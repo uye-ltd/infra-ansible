@@ -1,0 +1,11 @@
+---
+- name: Reload AppArmor profile
+  ansible.builtin.command:
+    cmd: apparmor_parser -r -W /etc/apparmor.d/infra-runner
+  changed_when: true
+
+- name: Restart runner egress policy
+  ansible.builtin.systemd_service:
+    name: infra-runner-egress.service
+    daemon_reload: true
+    state: restarted

@@ -1,0 +1,30 @@
+---
+wireguard_interface: wg0
+wireguard_address: "10.0.0.1/24"
+wireguard_listen_port: 51820
+wireguard_private_key: ""
+
+wireguard_nat: true
+wireguard_nat_interface: "{{ ansible_default_ipv4.interface }}"
+
+wireguard_dnsmasq_enabled: true
+wireguard_upstream_dns: "192.168.1.1"
+
+# Domains that VPN clients should resolve to the WireGuard server IP
+# (split-horizon). Each entry becomes a dnsmasq `address=/<domain>/<wg-ip>`
+# rule, so *.<domain> resolves to the server's wg0 address for VPN clients.
+wireguard_dnsmasq_internal_domains: []
+
+# Names carved OUT of the split-horizon: forwarded upstream so they resolve to
+# their real (public) IP even for connected clients. dnsmasq matches the longest
+# domain suffix, so a name here overrides the internal wildcard above. Use for the
+# WireGuard endpoint hostname, which must always resolve to the public IP.
+wireguard_dnsmasq_public_names: []
+
+# List of peer definitions.
+# - name: laptop
+#   public_key: "..."
+#   allowed_ips: "10.0.0.2/32"
+#   preshared_key: "..."     # optional but recommended
+#   persistent_keepalive: 25 # needed for clients behind NAT
+wireguard_peers: []

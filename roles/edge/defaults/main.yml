@@ -1,0 +1,12 @@
+---
+edge_user: ghrunner
+edge_repo_url: https://github.com/uye-ltd/infra-edge.git
+edge_repo_dir: /home/ghrunner/infra-edge
+edge_runner_dir: /home/ghrunner/infra-runner
+edge_cert_email: "{{ caddy_acme_email | default('') }}"
+edge_cloudflare_api_token: "{{ caddy_cloudflare_api_token | default('') }}"
+edge_credentials_dir: /home/ghrunner/.config/infra-edge
+edge_credentials_path: /home/ghrunner/.config/infra-edge/cloudflare.ini
+edge_overlay: ../infra-edge/deploy/docker-compose.infra-runner.yml
+edge_legacy_overlay: ../infra-edge/docker-compose.infra-runner.yml
+edge_active_marker: /etc/infra-edge-active

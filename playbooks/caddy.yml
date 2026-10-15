@@ -1,0 +1,12 @@
+---
+- name: Deploy Caddy web server
+  hosts: servers
+  become: true
+  pre_tasks:
+    - name: Check whether infra-edge owns ports 80 and 443
+      ansible.builtin.stat:
+        path: /etc/infra-edge-active
+      register: edge_active_state
+  roles:
+    - role: caddy
+      when: not edge_active_state.stat.exists

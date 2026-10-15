@@ -1,0 +1,6 @@
+---
+- name: Deploy FileBrowser
+  hosts: servers
+  become: true
+  roles:
+    - filebrowser

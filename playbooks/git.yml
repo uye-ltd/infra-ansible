@@ -1,0 +1,6 @@
+---
+- name: Clone / pull git repositories
+  hosts: servers
+  become: true
+  roles:
+    - git

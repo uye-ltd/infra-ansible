@@ -1,0 +1,12 @@
+# WireGuard VPN DNS resolver — managed by Ansible, do not edit manually.
+interface={{ wireguard_interface }}
+bind-interfaces
+listen-address={{ wireguard_address.split('/')[0] }}
+server={{ wireguard_upstream_dns }}
+no-resolv
+{% for domain in wireguard_dnsmasq_internal_domains %}
+address=/{{ domain }}/{{ wireguard_address.split('/')[0] }}
+{% endfor %}
+{% for name in wireguard_dnsmasq_public_names %}
+server=/{{ name }}/{{ wireguard_upstream_dns }}
+{% endfor %}

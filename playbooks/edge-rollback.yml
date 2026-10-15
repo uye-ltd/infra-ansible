@@ -1,0 +1,9 @@
+---
+- name: Restore Caddy and unregister edge
+  hosts: servers
+  become: true
+  tasks:
+    - name: Restore previous proxy
+      ansible.builtin.import_role:
+        name: edge
+        tasks_from: rollback

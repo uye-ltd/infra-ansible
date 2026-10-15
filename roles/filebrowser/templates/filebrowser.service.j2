@@ -1,0 +1,12 @@
+[Unit]
+Description=FileBrowser
+After=network.target
+
+[Service]
+User={{ filebrowser_user }}
+ExecStart=/usr/local/bin/filebrowser -c {{ filebrowser_data_dir }}/.filebrowser.json
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

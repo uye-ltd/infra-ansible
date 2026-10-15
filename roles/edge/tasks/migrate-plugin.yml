@@ -1,0 +1,123 @@
+---
+- name: Check that edge is active
+  ansible.builtin.stat:
+    path: "{{ edge_active_marker }}"
+  register: edge_active_state
+
+- name: Require an active edge before migrating its plugin
+  ansible.builtin.assert:
+    that: edge_active_state.stat.exists
+    fail_msg: Edge is not active; use edge-cutover.yml for the first registration
+
+- name: Check the new edge overlay
+  ansible.builtin.stat:
+    path: "{{ edge_repo_dir }}/deploy/docker-compose.infra-runner.yml"
+  register: edge_new_overlay
+
+- name: Check the new edge plugin descriptor
+  ansible.builtin.stat:
+    path: "{{ edge_repo_dir }}/deploy/infra-edge.plugin"
+  register: edge_new_plugin
+
+- name: Require the updated edge checkout
+  ansible.builtin.assert:
+    that:
+      - edge_new_overlay.stat.isreg | default(false)
+      - edge_new_plugin.stat.isreg | default(false)
+    fail_msg: Pull infra-edge before migrating the active runner overlay
+
+- name: Read the current runner Compose file list
+  ansible.builtin.slurp:
+    src: "{{ edge_runner_dir }}/.env"
+  register: edge_runner_env
+  no_log: true
+
+- name: Save the current runner Compose file list
+  ansible.builtin.set_fact:
+    edge_previous_compose_file: >-
+      {{ edge_runner_env.content | b64decode
+         | regex_findall('(?m)^COMPOSE_FILE=(.+)$') | first | default('') }}
+
+- name: Require the existing edge overlay registration
+  ansible.builtin.assert:
+    that:
+      - edge_previous_compose_file | length > 0
+      - edge_legacy_overlay in edge_previous_compose_file.split(':') or edge_overlay in edge_previous_compose_file.split(':')
+    fail_msg: The active runner has no edge overlay in COMPOSE_FILE
+
+- name: Preserve other overlays and register the new edge overlay once
+  ansible.builtin.set_fact:
+    edge_migrated_compose_file: >-
+      {{ (edge_previous_compose_file.split(':')
+          | reject('equalto', edge_legacy_overlay) | reject('equalto', edge_overlay)
+          | list + [edge_overlay]) | join(':') }}
+
+- name: Switch and verify the active edge plugin mount
+  block:
+    - name: Update the runner Compose file list
+      ansible.builtin.lineinfile:
+        path: "{{ edge_runner_dir }}/.env"
+        regexp: '^COMPOSE_FILE='
+        line: "COMPOSE_FILE={{ edge_migrated_compose_file }}"
+      when: edge_migrated_compose_file != edge_previous_compose_file
+
+    - name: Validate the updated runner Compose configuration
+      ansible.builtin.command:
+        argv: [docker, compose, config, --quiet]
+        chdir: "{{ edge_runner_dir }}"
+      become_user: "{{ edge_user }}"
+      become: true
+      changed_when: false
+
+    - name: Recreate deployer with the new edge plugin mount
+      ansible.builtin.command:
+        argv: [docker, compose, up, -d, --no-deps, deployer]
+        chdir: "{{ edge_runner_dir }}"
+      become_user: "{{ edge_user }}"
+      become: true
+      changed_when: true
+      when: edge_migrated_compose_file != edge_previous_compose_file
+
+    - name: Verify the new plugin descriptor is readable inside deployer
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, deployer, test, -r, /plugins/infra-edge.plugin]
+        chdir: "{{ edge_runner_dir }}"
+      become_user: "{{ edge_user }}"
+      become: true
+      changed_when: false
+
+    - name: Verify deployer health after edge plugin migration
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/health
+        status_code: 200
+      register: edge_deployer_health
+      until: edge_deployer_health.status | default(0) == 200
+      retries: 20
+      delay: 5
+
+    - name: Verify the edge container remains healthy
+      ansible.builtin.command:
+        argv: [docker, inspect, --format, "{{ '{{.State.Health.Status}}' }}", uye-edge]
+      register: edge_health_result
+      changed_when: false
+      until: edge_health_result.stdout | default('') == 'healthy'
+      retries: 20
+      delay: 5
+  rescue:
+    - name: Restore the previous runner Compose file list
+      ansible.builtin.lineinfile:
+        path: "{{ edge_runner_dir }}/.env"
+        regexp: '^COMPOSE_FILE='
+        line: "COMPOSE_FILE={{ edge_previous_compose_file }}"
+
+    - name: Restore deployer with the previous edge plugin mount
+      ansible.builtin.command:
+        argv: [docker, compose, up, -d, --no-deps, deployer]
+        chdir: "{{ edge_runner_dir }}"
+      become_user: "{{ edge_user }}"
+      become: true
+      changed_when: true
+
+    - name: Report failed edge plugin migration
+      ansible.builtin.fail:
+        msg: Edge plugin migration failed; the previous runner overlay was restored

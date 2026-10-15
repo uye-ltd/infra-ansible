@@ -1,0 +1,20 @@
+---
+common_packages:   
+  - curl                                                                                                             
+  - git                                                                                                              
+  - htop                                                                                                             
+  - unzip  
+  - nano                                           
+  - vim 
+  - tmux
+  - rsync
+  - jq
+  - tree
+  - net-tools
+  - dnsutils
+  - lsof
+  - iotop
+  - iftop
+  - ncdu
+  - make
+  - cosign

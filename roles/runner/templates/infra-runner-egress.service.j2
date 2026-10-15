@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply infra-runner egress policy after Docker and UFW
+Requires=docker.service
+After=docker.service ufw.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PERSIST=0 RUNNER_SUBNET={{ runner_subnet }}
+ExecStart={{ runner_repo_dest }}/scripts/setup-egress-policy.sh
+
+[Install]
+WantedBy=docker.service

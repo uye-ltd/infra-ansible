@@ -1,0 +1,11 @@
+[Interface]
+PrivateKey = {{ peer_private_key }}
+Address = {{ peer_address }}
+DNS = {{ wg_server_address }}
+
+[Peer]
+PublicKey = {{ wireguard_server_public_key }}
+PresharedKey = {{ peer_psk }}
+Endpoint = {{ wg_server_endpoint }}:{{ wg_listen_port }}
+AllowedIPs = {{ wg_client_allowed_ips }}
+PersistentKeepalive = 25

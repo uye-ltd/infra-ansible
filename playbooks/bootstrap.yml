@@ -1,0 +1,10 @@
+---
+# Initial server bootstrap: base system + users + firewall.
+# Safe to run on a freshly provisioned machine before other services are installed.
+- name: Bootstrap server
+  hosts: servers
+  become: true
+  roles:
+    - common
+    - users
+    - ufw

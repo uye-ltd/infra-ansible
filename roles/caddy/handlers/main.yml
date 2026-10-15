@@ -1,0 +1,16 @@
+---
+# NOTE: Ansible runs handlers in the order they are DEFINED here, not the order
+# notified. "Restart Caddy" must come first so that a binary swap (e.g. installing
+# a DNS plugin via `caddy add-package`) takes effect via a full restart before any
+# "Reload Caddy" tries to push config to a stale, plugin-less running process.
+- name: Restart Caddy
+  ansible.builtin.service:
+    name: caddy
+    state: restarted
+  when: not ansible_check_mode
+
+- name: Reload Caddy
+  ansible.builtin.service:
+    name: caddy
+    state: reloaded
+  when: not ansible_check_mode

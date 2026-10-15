@@ -1,0 +1,120 @@
+---
+# Run ONCE before playbooks/wireguard.yml to generate all WireGuard keypairs.
+# Prerequisites: wireguard-tools installed locally (brew install wireguard-tools)
+#
+# Output:
+#   secrets/wireguard.yml        — key material (gitignored, loaded by wireguard role)
+#   secrets/clients/macbook.conf — importable WireGuard config for macbook
+#   secrets/clients/android.conf — importable WireGuard config for android (scan as QR)
+
+- name: Generate WireGuard keypairs and client configs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    secrets_dir: "{{ playbook_dir }}/../secrets"
+    secrets_file: "{{ secrets_dir }}/wireguard.yml"
+    clients_dir: "{{ secrets_dir }}/clients"
+    wg_server_endpoint: "vpn.uye.rocks"
+    wg_listen_port: 51820
+    wg_server_address: "10.0.0.1"
+    wg_client_allowed_ips: "10.0.0.0/24,192.168.1.0/24"
+    wg_peers:
+      - name: macbook
+        address: "10.0.0.2/32"
+      - name: android
+        address: "10.0.0.3/32"
+
+  tasks:
+    - name: Verify wg is available locally
+      ansible.builtin.command: which wg
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      register: _wg_check
+
+    - name: Fail with install hint if wg missing
+      ansible.builtin.fail:
+        msg: "wg not found. Install with: brew install wireguard-tools"
+      when: _wg_check.rc != 0
+
+    - name: Create secrets directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ secrets_dir }}"
+        - "{{ clients_dir }}"
+
+    - name: Check if secrets file already exists
+      ansible.builtin.stat:
+        path: "{{ secrets_file }}"
+      register: _secrets_stat
+
+    - name: Generate all keypairs
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          server_priv=$(wg genkey)
+          server_pub=$(echo "$server_priv" | wg pubkey)
+          macbook_priv=$(wg genkey)
+          macbook_pub=$(echo "$macbook_priv" | wg pubkey)
+          macbook_psk=$(wg genpsk)
+          android_priv=$(wg genkey)
+          android_pub=$(echo "$android_priv" | wg pubkey)
+          android_psk=$(wg genpsk)
+          printf '%s\n' \
+            "---" \
+            "wireguard_private_key: \"$server_priv\"" \
+            "wireguard_server_public_key: \"$server_pub\"" \
+            "wg_peers_keys:" \
+            "  macbook:" \
+            "    private_key: \"$macbook_priv\"" \
+            "    public_key: \"$macbook_pub\"" \
+            "    psk: \"$macbook_psk\"" \
+            "  android:" \
+            "    private_key: \"$android_priv\"" \
+            "    public_key: \"$android_pub\"" \
+            "    psk: \"$android_psk\""
+        executable: /bin/bash
+      register: _keys_yaml
+      changed_when: true
+      when: not _secrets_stat.stat.exists
+
+    - name: Save secrets file
+      ansible.builtin.copy:
+        content: "{{ _keys_yaml.stdout }}\n"
+        dest: "{{ secrets_file }}"
+        mode: "0600"
+      when: not _secrets_stat.stat.exists
+
+    - name: Load secrets
+      ansible.builtin.include_vars:
+        file: "{{ secrets_file }}"
+      when: _secrets_stat.stat.exists or not ansible_check_mode
+
+    - name: Generate client configs
+      ansible.builtin.template:
+        src: templates/wg-client.conf.j2
+        dest: "{{ clients_dir }}/{{ item.name }}.conf"
+        mode: "0600"
+      loop: "{{ wg_peers }}"
+      vars:
+        peer_address: "{{ item.address }}"
+        peer_private_key: "{{ wg_peers_keys[item.name].private_key }}"
+        peer_psk: "{{ wg_peers_keys[item.name].psk }}"
+      when: _secrets_stat.stat.exists or not ansible_check_mode
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "Keys written to secrets/wireguard.yml"
+          - "Client configs written to secrets/clients/"
+          - ""
+          - "Next steps:"
+          - "  1. Forward UDP 51820 on your router to 192.168.1.15"
+          - "  2. ansible-playbook -i inventory/hosts.yml playbooks/wireguard.yml"
+          - "  3. Import secrets/clients/macbook.conf into WireGuard app"
+          - "  4. For Android: qrencode -t ansiutf8 < secrets/clients/android.conf"

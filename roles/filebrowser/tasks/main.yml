@@ -1,0 +1,141 @@
+---
+- name: Assert admin password is set
+  ansible.builtin.assert:
+    that: filebrowser_admin_password | length > 0
+    fail_msg: "filebrowser_admin_password must be set — provide via vars or secrets manager"
+  tags: [filebrowser]
+
+- name: Detect FileBrowser architecture
+  ansible.builtin.set_fact:
+    _filebrowser_arch: "{{ _arch_map[ansible_architecture] | default('linux-amd64') }}"
+  vars:
+    _arch_map:
+      x86_64: linux-amd64
+      aarch64: linux-arm64
+      armv7l: linux-armv7
+  tags: [filebrowser]
+
+- name: Check installed FileBrowser version
+  ansible.builtin.command:
+    cmd: /usr/local/bin/filebrowser version
+  register: _filebrowser_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [filebrowser, install]
+
+- name: Create FileBrowser directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ filebrowser_user }}"
+    group: "{{ filebrowser_user }}"
+    mode: "0755"
+  loop:
+    - "{{ filebrowser_data_dir }}"
+    - "{{ filebrowser_root_dir }}"
+  tags: [filebrowser]
+
+- name: Fix FileBrowser data directory ownership
+  ansible.builtin.file:
+    path: "{{ filebrowser_data_dir }}"
+    owner: "{{ filebrowser_user }}"
+    group: "{{ filebrowser_user }}"
+    recurse: true
+  tags: [filebrowser]
+
+- name: Download FileBrowser binary
+  ansible.builtin.get_url:
+    url: "https://github.com/filebrowser/filebrowser/releases/download/v{{ filebrowser_version }}/{{ _filebrowser_arch }}-filebrowser.tar.gz"
+    dest: /tmp/filebrowser.tar.gz
+    checksum: "{{ filebrowser_checksum | default(omit, true) }}"
+    mode: "0644"
+  register: _filebrowser_download
+  when: >
+    _filebrowser_installed.rc != 0 or
+    filebrowser_version not in _filebrowser_installed.stdout
+  tags: [filebrowser, install]
+
+- name: Extract FileBrowser binary
+  ansible.builtin.unarchive:
+    src: /tmp/filebrowser.tar.gz
+    dest: /usr/local/bin
+    include: filebrowser
+    remote_src: true
+    mode: "0755"
+  notify: Restart FileBrowser
+  when: (_filebrowser_download.changed | default(false)) and not ansible_check_mode
+  tags: [filebrowser, install]
+
+- name: Deploy FileBrowser config
+  ansible.builtin.template:
+    src: filebrowser.json.j2
+    dest: "{{ filebrowser_data_dir }}/.filebrowser.json"
+    owner: "{{ filebrowser_user }}"
+    group: "{{ filebrowser_user }}"
+    mode: "0640"
+  notify: Restart FileBrowser
+  tags: [filebrowser, config]
+
+- name: Check if FileBrowser database exists
+  ansible.builtin.stat:
+    path: "{{ filebrowser_data_dir }}/filebrowser.db"
+  register: _filebrowser_db
+  tags: [filebrowser]
+
+- name: Initialize FileBrowser database
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/filebrowser
+      - -c
+      - "{{ filebrowser_data_dir }}/.filebrowser.json"
+      - config
+      - init
+  become_user: "{{ filebrowser_user }}"
+  when: not _filebrowser_db.stat.exists
+  changed_when: true
+  tags: [filebrowser, install]
+
+- name: Create FileBrowser admin user
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/filebrowser
+      - -c
+      - "{{ filebrowser_data_dir }}/.filebrowser.json"
+      - users
+      - add
+      - admin
+      - "{{ filebrowser_admin_password }}"
+      - --perm.admin
+  become_user: "{{ filebrowser_user }}"
+  no_log: true
+  when: not _filebrowser_db.stat.exists
+  changed_when: true
+  tags: [filebrowser, install]
+
+- name: Deploy FileBrowser systemd unit
+  ansible.builtin.template:
+    src: filebrowser.service.j2
+    dest: /etc/systemd/system/filebrowser.service
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart FileBrowser
+  tags: [filebrowser, service]
+
+- name: Allow FileBrowser through UFW
+  community.general.ufw:
+    rule: allow
+    port: "{{ filebrowser_port | string }}"
+    proto: tcp
+    comment: FileBrowser
+  when: filebrowser_address != '127.0.0.1'
+  tags: [filebrowser, firewall]
+
+- name: Enable and start FileBrowser
+  ansible.builtin.systemd:
+    name: filebrowser
+    state: started
+    enabled: true
+  when: not ansible_check_mode
+  tags: [filebrowser]

@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  role_name: runner
+  author: uye
+  description: Prepares a server to host the uye self-hosted GitHub Actions runner stack
+  license: MIT
+  min_ansible_version: "2.12"
+dependencies: []

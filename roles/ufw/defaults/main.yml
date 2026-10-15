@@ -1,0 +1,5 @@
+---
+
+ufw_rules:
+  - port: "22"
+    comment: SSH

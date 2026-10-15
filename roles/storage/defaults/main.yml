@@ -1,0 +1,7 @@
+---
+storage_mounts: []
+# - src: /dev/sdb1
+#   path: /data
+#   fstype: ext4
+#   opts: defaults
+#   state: mounted

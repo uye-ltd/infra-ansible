@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: common
+  author: "{{ lookup('env', 'USER') }}"
+  platforms:
+    - name: Ubuntu
+      versions: ["22.04", "24.04"]
+    - name: EL
+      versions: ["9"]
+dependencies: []

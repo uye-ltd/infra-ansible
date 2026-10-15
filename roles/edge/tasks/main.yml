@@ -1,0 +1,113 @@
+---
+- name: Assert edge prerequisites
+  ansible.builtin.assert:
+    that:
+      - edge_cert_email | length > 0
+      - edge_cloudflare_api_token | length > 0
+    fail_msg: Edge needs an ACME email and Cloudflare DNS token
+  no_log: true
+  tags: [edge, prepare]
+
+- name: Clone or update infra-edge
+  ansible.builtin.git:
+    repo: "{{ edge_repo_url }}"
+    dest: "{{ edge_repo_dir }}"
+    version: main
+    update: true
+  become_user: "{{ edge_user }}"
+  become: true
+  when: not ansible_check_mode
+  tags: [edge, prepare]
+
+- name: Create private edge credentials directory
+  ansible.builtin.file:
+    path: "{{ edge_credentials_dir }}"
+    state: directory
+    owner: "{{ edge_user }}"
+    group: "{{ edge_user }}"
+    mode: "0700"
+  tags: [edge, prepare]
+
+- name: Install Cloudflare DNS credential outside the checkout
+  ansible.builtin.copy:
+    content: "dns_cloudflare_api_token = {{ edge_cloudflare_api_token }}\n"
+    dest: "{{ edge_credentials_path }}"
+    owner: "{{ edge_user }}"
+    group: "{{ edge_user }}"
+    mode: "0600"
+  no_log: true
+  tags: [edge, prepare]
+
+- name: Install edge environment
+  ansible.builtin.template:
+    src: edge.env.j2
+    dest: "{{ edge_repo_dir }}/.env"
+    owner: "{{ edge_user }}"
+    # The deployer runs as root with all capabilities dropped. It needs group
+    # read access to this bind-mounted file because it cannot bypass mode 0600.
+    group: root
+    mode: "0640"
+  when: not ansible_check_mode
+  tags: [edge, prepare]
+
+- name: Validate production Compose before certificate issuance
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - -f
+      - "{{ edge_repo_dir }}/docker-compose.yml"
+      - -f
+      - "{{ edge_repo_dir }}/docker-compose.production.yml"
+      - config
+      - --quiet
+    chdir: "{{ edge_repo_dir }}"
+  become_user: "{{ edge_user }}"
+  become: true
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [edge, prepare]
+
+- name: Obtain or retain four-domain certificate through Cloudflare DNS
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - -f
+      - "{{ edge_repo_dir }}/docker-compose.yml"
+      - -f
+      - "{{ edge_repo_dir }}/docker-compose.production.yml"
+      - --profile
+      - certbot
+      - run
+      - --rm
+      - --no-deps
+      - certbot
+    chdir: "{{ edge_repo_dir }}"
+  become_user: "{{ edge_user }}"
+  become: true
+  register: edge_certbot_result
+  changed_when: "'Successfully received certificate' in edge_certbot_result.stdout"
+  when: not ansible_check_mode
+  tags: [edge, prepare]
+
+- name: Keep infra-edge checkout current for deployer descriptors
+  ansible.builtin.cron:
+    name: infra-edge checkout update
+    user: "{{ edge_user }}"
+    minute: '*/5'
+    job: "git -C {{ edge_repo_dir }} pull --ff-only origin main"
+  when: not ansible_check_mode
+  tags: [edge, prepare]
+
+- name: Renew edge certificate daily
+  ansible.builtin.cron:
+    name: infra-edge certificate renewal
+    user: "{{ edge_user }}"
+    minute: '0'
+    hour: '3'
+    job: >-
+      COMPOSE_FILE={{ edge_repo_dir }}/docker-compose.yml:{{ edge_repo_dir }}/docker-compose.production.yml
+      {{ edge_repo_dir }}/scripts/certbot-renew.sh >> /home/{{ edge_user }}/certbot-renew.log 2>&1
+  when: not ansible_check_mode
+  tags: [edge, prepare]

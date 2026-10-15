@@ -1,0 +1,12 @@
+---
+- name: Configure WireGuard VPN
+  hosts: servers
+  become: true
+  pre_tasks:
+    - name: Port forwarding reminder
+      ansible.builtin.debug:
+        msg: "Reminder: forward UDP {{ wireguard_listen_port | default(51820) }} on your router to {{ ansible_host }}"
+      run_once: true
+  roles:
+    - ufw
+    - wireguard

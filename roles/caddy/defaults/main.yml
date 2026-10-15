@@ -1,0 +1,12 @@
+---
+caddy_acme_email: ""
+caddy_config_dir: /etc/caddy
+caddy_log_dir: /var/log/caddy
+caddy_admin_api: "localhost:2019"
+caddy_extra_global_options: ""
+caddy_sites_config: ""
+caddy_open_firewall: true
+
+# Cloudflare API token for the ACME DNS-01 challenge (caddy-dns/cloudflare).
+# Set per-host (e.g. from .env). Leave empty to disable DNS-01 delivery.
+caddy_cloudflare_api_token: ""

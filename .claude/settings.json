@@ -1,0 +1,21 @@
+{
+  "env": {
+    "PATH": "/Users/macbook/Dev/uye/infra-ansible/venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  },
+  "plugins": {
+    "uye": {
+      "tools": [
+        "ansible",
+        "crowdsec",
+        "docker",
+        "docker-buildx",
+        "docker-compose",
+        "filebrowser",
+        "wireguard"
+      ]
+    }
+  },
+  "enabledPlugins": {
+    "uye@uye": true
+  }
+}

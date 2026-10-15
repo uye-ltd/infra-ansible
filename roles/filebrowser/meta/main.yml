@@ -1,0 +1,7 @@
+---
+galaxy_info:
+  role_name: filebrowser
+  platforms:
+    - name: Ubuntu
+      versions: ["22.04", "24.04"]
+dependencies: []

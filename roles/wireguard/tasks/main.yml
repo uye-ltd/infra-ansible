@@ -1,0 +1,93 @@
+---
+- name: Load WireGuard secrets
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../secrets/wireguard.yml"
+  tags: [wireguard]
+
+- name: Allow WireGuard port through firewall
+  community.general.ufw:
+    rule: allow
+    port: "{{ wireguard_listen_port | string }}"
+    proto: udp
+    comment: WireGuard
+  tags: [wireguard]
+
+- name: Allow DNS from VPN clients
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: any
+    src: "{{ wireguard_address | regex_replace('^(\\d+\\.\\d+\\.\\d+)\\.\\d+/(\\d+)$', '\\1.0/\\2') }}"
+    comment: DNS for VPN clients
+  tags: [wireguard, dns]
+
+- name: Enable packet forwarding in UFW
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^DEFAULT_FORWARD_POLICY='
+    line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+  notify: Reload ufw
+  tags: [wireguard]
+
+- name: Install WireGuard
+  ansible.builtin.package:
+    name: wireguard
+    state: present
+  tags: [wireguard, install]
+
+- name: Enable IP forwarding
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "1"
+    state: present
+    reload: true
+  loop:
+    - net.ipv4.ip_forward
+    - net.ipv6.conf.all.forwarding
+  tags: [wireguard, sysctl]
+
+- name: Allow forwarding from WireGuard interface
+  ansible.builtin.iptables:
+    chain: FORWARD
+    in_interface: "{{ wireguard_interface }}"
+    jump: ACCEPT
+  when: wireguard_nat | bool
+  tags: [wireguard]
+
+- name: Masquerade outbound WireGuard traffic
+  ansible.builtin.iptables:
+    table: nat
+    chain: POSTROUTING
+    out_interface: "{{ wireguard_nat_interface }}"
+    jump: MASQUERADE
+  when: wireguard_nat | bool
+  tags: [wireguard]
+
+- name: Deploy WireGuard interface config
+  ansible.builtin.template:
+    src: wg0.conf.j2
+    dest: "/etc/wireguard/{{ wireguard_interface }}.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Reload WireGuard
+  tags: [wireguard, config]
+
+- name: Reset any previous WireGuard service failure
+  ansible.builtin.command: systemctl reset-failed "wg-quick@{{ wireguard_interface }}"
+  changed_when: false
+  failed_when: false
+  tags: [wireguard]
+
+- name: Enable and start WireGuard
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ wireguard_interface }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags: [wireguard]
+
+- name: Configure dnsmasq for VPN clients
+  ansible.builtin.include_tasks: dnsmasq.yml
+  when: wireguard_dnsmasq_enabled | bool
+  tags: [wireguard, dns]

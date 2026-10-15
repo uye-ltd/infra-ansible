@@ -1,0 +1,11 @@
+---
+- name: Replace Caddy with signed infra-edge
+  hosts: servers
+  become: true
+  roles:
+    - edge
+  tasks:
+    - name: Switch public ports to infra-edge
+      ansible.builtin.import_role:
+        name: edge
+        tasks_from: cutover

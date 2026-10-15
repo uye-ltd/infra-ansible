@@ -1,0 +1,22 @@
+---
+# Run only after Docker, the egress unit and the verified runner image exist.
+- name: Install or verify the pinned Kata runtime
+  ansible.builtin.command:
+    cmd: "{{ runner_repo_dest }}/scripts/setup-kata.sh"
+  register: _runner_kata_setup
+  changed_when: "'already installed' not in _runner_kata_setup.stdout"
+  when: not ansible_check_mode
+  tags: [runner, kata]
+
+- name: Probe the verified runner image inside Kata
+  ansible.builtin.command:
+    cmd: "{{ runner_repo_dest }}/scripts/check-kata-runner.sh {{ runner_image }}"
+  environment:
+    RUNNER_MEMORY: "{{ runner_memory }}"
+    RUNNER_KANIKO_SIZE: "{{ runner_kaniko_size }}"
+    RUNNER_APPARMOR_PROFILE: "{{ runner_apparmor_profile }}"
+    RUNNER_SECCOMP_HOST_PATH: "{{ runner_repo_dest }}/seccomp/runner-profile.json"
+    RUNNER_KATA_DNS: "{{ runner_kata_dns }}"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [runner, kata]

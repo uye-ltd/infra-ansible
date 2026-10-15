@@ -1,0 +1,27 @@
+---
+# Ubuntu codename to use for the Docker apt repo. Override when the distro
+# is newer than Docker's latest supported release (e.g. pin to "noble" on 26.04).
+docker_repo_codename: "{{ ansible_facts['distribution_release'] }}"
+
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# OS users to add to the docker group.
+docker_users: [rwrotson]
+
+# Daemon log rotation.
+docker_log_driver: json-file
+docker_log_max_size: "10m"
+docker_log_max_file: "3"
+
+# Optional address pool for Docker bridge networks.
+# Set to restrict job-container subnets to a predictable range.
+# Example: [{ base: "10.89.0.0/16", size: 24 }]
+docker_address_pools: []
+
+# Runtime registrations to preserve when Ansible renders daemon.json.
+docker_runtimes: {}

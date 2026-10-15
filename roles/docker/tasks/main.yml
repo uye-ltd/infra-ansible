@@ -1,0 +1,83 @@
+---
+- name: Install Docker prerequisites (Debian)
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - gnupg
+    state: present
+    update_cache: true
+  when: ansible_facts['os_family'] == "Debian"
+  tags: [docker, install]
+
+- name: Set Docker architecture fact
+  ansible.builtin.set_fact:
+    _docker_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
+  tags: [docker, install]
+
+- name: Ensure /etc/apt/keyrings exists (Debian)
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: ansible_facts['os_family'] == "Debian"
+  tags: [docker, install]
+
+- name: Download Docker GPG key (Debian)
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+    force: false
+  when: ansible_facts['os_family'] == "Debian"
+  tags: [docker, install]
+
+- name: Add Docker apt repository (Debian)
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ _docker_arch }} signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu
+      {{ docker_repo_codename }} stable
+    state: present
+    filename: docker
+  register: _docker_apt_repo
+  when: ansible_facts['os_family'] == "Debian"
+  tags: [docker, install]
+
+- name: Update apt cache after adding Docker repository (Debian)
+  ansible.builtin.apt:
+    update_cache: true
+  when: _docker_apt_repo is changed
+  tags: [docker, install]
+
+- name: Add Docker dnf repository (RedHat)
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/centos/docker-ce.repo
+    dest: /etc/yum.repos.d/docker-ce.repo
+    mode: "0644"
+  when: ansible_facts['os_family'] == "RedHat"
+  tags: [docker, install]
+
+- name: Install Docker packages
+  ansible.builtin.package:
+    name: "{{ docker_packages }}"
+    state: present
+  notify: Start and enable Docker
+  tags: [docker, install]
+
+- name: Configure Docker daemon
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Docker
+  tags: [docker, config]
+
+- name: Add users to docker group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+  tags: [docker, users]

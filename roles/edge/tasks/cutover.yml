@@ -1,0 +1,91 @@
+---
+- name: Check whether edge is already active
+  ansible.builtin.stat:
+    path: "{{ edge_active_marker }}"
+  register: edge_active_state
+
+- name: Switch traffic from Caddy to signed infra-edge
+  when: not edge_active_state.stat.exists
+  block:
+    - name: Verify all migrated upstream ports before stopping Caddy
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ item }}"
+        timeout: 5
+      loop: [4533, 3001, 8200, 9000]
+
+    - name: Read current runner Compose file list
+      ansible.builtin.slurp:
+        src: "{{ edge_runner_dir }}/.env"
+      register: edge_runner_env
+      no_log: true
+
+    - name: Preserve existing overlays and append edge once
+      ansible.builtin.set_fact:
+        edge_current_compose_file: >-
+          {{ edge_runner_env.content | b64decode
+             | regex_findall('(?m)^COMPOSE_FILE=(.+)$') | first
+             | default('docker-compose.yml:docker-compose.override.yml') }}
+      no_log: true
+
+    - name: Stop Caddy before binding NGINX to ports 80 and 443
+      ansible.builtin.systemd_service:
+        name: caddy
+        enabled: false
+        state: stopped
+
+    - name: Register edge checkout for deployer
+      ansible.builtin.lineinfile:
+        path: "{{ edge_runner_dir }}/.env"
+        regexp: '^EDGE_COMPOSE_DIR='
+        line: "EDGE_COMPOSE_DIR={{ edge_repo_dir }}"
+
+    - name: Register edge overlay without removing other plugins
+      ansible.builtin.lineinfile:
+        path: "{{ edge_runner_dir }}/.env"
+        regexp: '^COMPOSE_FILE='
+        line: >-
+          COMPOSE_FILE={{ (edge_current_compose_file.split(':')
+          | reject('equalto', edge_legacy_overlay) | reject('equalto', edge_overlay)
+          | list + [edge_overlay]) | join(':') }}
+
+    - name: Recreate deployer with edge plugin mount
+      ansible.builtin.command:
+        argv: [docker, compose, up, -d, --no-deps, deployer]
+        chdir: "{{ edge_runner_dir }}"
+      become_user: "{{ edge_user }}"
+      become: true
+      changed_when: true
+
+    - name: Wait for signed NGINX image and healthy edge container
+      ansible.builtin.command:
+        argv: [docker, inspect, --format, "{{ '{{.State.Health.Status}}' }}", uye-edge]
+      register: edge_health_result
+      changed_when: false
+      failed_when: false
+      until: edge_health_result.rc == 0 and edge_health_result.stdout == 'healthy'
+      retries: 60
+      delay: 5
+
+    - name: Verify deployer accepted the edge plugin
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/health
+        status_code: 200
+      register: edge_deployer_health
+      until: edge_deployer_health.status == 200
+      retries: 20
+      delay: 5
+
+    - name: Mark edge active so site playbook cannot restart Caddy
+      ansible.builtin.copy:
+        dest: "{{ edge_active_marker }}"
+        content: "nginx\n"
+        owner: root
+        group: root
+        mode: "0644"
+  rescue:
+    - name: Restore Caddy after failed edge cutover
+      ansible.builtin.include_tasks: rollback.yml
+    - name: Report failed cutover
+      ansible.builtin.fail:
+        msg: Edge failed to become healthy; Caddy and the previous deployer configuration were restored

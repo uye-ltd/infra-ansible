@@ -1,0 +1,33 @@
+---
+# GitHub App credentials for private repo access.
+# When app_id is set, a short-lived installation token is generated each run and
+# exposed as git_app_token. Use it in repo URLs:
+#   https://x-access-token:{{ git_app_token }}@github.com/org/repo.git
+# key_path: path to the App's PEM private key on the controller (never committed).
+git_github_app:
+  app_id: ""
+  installation_id: ""
+  key_path: ""
+
+# SSH keys to copy from the controller to the server (for non-GitHub or SSH-based repos).
+# Each entry: { path, key }
+# key must come from a lookup — never commit plaintext.
+# Example:
+#   - path: /home/rwrotson/.ssh/deploy_key
+#     key: "{{ lookup('ansible.builtin.file', '~/.ssh/deploy_key') }}"
+git_deploy_keys: []
+
+# Default SSH key_file on the server, used when key_file is omitted per repo.
+git_default_key_file: ""
+
+# Repos to clone or keep in sync.
+# Each entry: { repo, dest, version (default: HEAD), user (optional), key_file (optional) }
+# Example:
+#   - repo: https://github.com/user/public-app.git
+#     dest: /opt/public-app
+#     version: main
+#   - repo: "https://x-access-token:{{ git_app_token }}@github.com/org/private-app.git"
+#     dest: /opt/private-app
+#     version: main
+#     user: rwrotson
+git_repos: []

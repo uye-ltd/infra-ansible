@@ -1,0 +1,15 @@
+---
+# Play 1: ensure Docker is installed and running before runner tasks execute.
+# The docker role's handlers (start/restart Docker) flush at play end, so
+# DOCKER-USER exists by the time the runner play's iptables tasks run.
+- name: Install and configure Docker
+  hosts: servers
+  become: true
+  roles:
+    - docker
+
+- name: Prepare server for self-hosted GitHub Actions runner
+  hosts: servers
+  become: true
+  roles:
+    - runner

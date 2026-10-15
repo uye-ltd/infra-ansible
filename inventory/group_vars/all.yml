@@ -1,0 +1,20 @@
+---
+# Applied to every host in the inventory.
+# Override per-group in group_vars/<group>.yml or per-host in host_vars/<host>.yml.
+
+timezone: UTC
+
+ansible_python_interpreter: /usr/bin/python3
+
+users:
+  - name: rwrotson
+    groups: [sudo]
+    sudo: true
+    ssh_public_keys:
+      - "{{ lookup('file', '~/.ssh/homeserver_ed25519.pub') }}"
+      - >-
+        {{ lookup('env', 'ANDROID_SSH_PUBLIC_KEY')
+           or (lookup('ansible.builtin.file', inventory_dir + '/../.env', errors='ignore')
+               | default('', true)
+               | regex_findall('(?m)^ANDROID_SSH_PUBLIC_KEY=(.+)$')
+               | join('')) }}

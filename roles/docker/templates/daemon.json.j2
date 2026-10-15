@@ -1,0 +1,10 @@
+{
+  "log-driver": "{{ docker_log_driver }}",
+  "log-opts": {
+    "max-size": "{{ docker_log_max_size }}",
+    "max-file": "{{ docker_log_max_file }}"
+  }{% if docker_address_pools %},
+  "default-address-pools": {{ docker_address_pools | to_json }}{% endif %}{% if docker_runtimes %},
+  "runtimes": {{ docker_runtimes | to_json }}{% endif %}
+}
+

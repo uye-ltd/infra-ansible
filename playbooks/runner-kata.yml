@@ -1,0 +1,11 @@
+---
+# Targeted Kata install and full compatibility probe. Does not template .env or
+# daemon.json and does not restart Docker, Vault, or the runner stack.
+- name: Verify Kata for infra-runner
+  hosts: servers
+  become: true
+  tasks:
+    - name: Install Kata and run the compatibility probe
+      ansible.builtin.import_role:
+        name: runner
+        tasks_from: kata
