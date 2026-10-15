@@ -1,0 +1,102 @@
+{
+  "groups": [
+    {
+      "name": "infra-vault",
+      "github_repo": "uye-ltd/infra-vault",
+      "workflow": "ci.yml",
+      "images": [
+        {
+          "key": "vault-unseal",
+          "repo": "ghcr.io/uye-ltd/vault-unseal",
+          "project": "infra-vault",
+          "service": "vault-unseal",
+          "manifest": "/etc/uye-deploy/compose/vault-unseal.yml",
+          "health": "running"
+        }
+      ]
+    },
+    {
+      "name": "infra-edge",
+      "github_repo": "uye-ltd/infra-edge",
+      "workflow": "ci.yml",
+      "images": [
+        {
+          "key": "nginx",
+          "repo": "ghcr.io/uye-ltd/infra-edge",
+          "project": "infra-edge",
+          "service": "nginx",
+          "manifest": "/etc/uye-deploy/compose/edge.yml",
+          "health": "healthy"
+        }
+      ]
+    },
+    {
+      "name": "infra-portainer",
+      "github_repo": "uye-ltd/infra-portainer",
+      "workflow": "ci.yml",
+      "images": [
+        {
+          "key": "portainer",
+          "repo": "ghcr.io/uye-ltd/portainer",
+          "project": "infra-portainer",
+          "service": "portainer",
+          "manifest": "/etc/uye-deploy/compose/portainer.yml",
+          "health": "healthy"
+        }
+      ]
+    },
+    {
+      "name": "infra-runner",
+      "github_repo": "uye-ltd/infra-runner",
+      "workflow": "deploy.yml",
+      "images": [
+        {
+          "key": "runner",
+          "repo": "ghcr.io/uye-ltd/infra-runner",
+          "local_tag": "ghcr.io/uye-ltd/infra-runner:verified"
+        },
+        {
+          "key": "controller",
+          "repo": "ghcr.io/uye-ltd/infra-runner-controller",
+          "local_tag": "ghcr.io/uye-ltd/infra-runner-controller:verified",
+          "project": "infra-runner",
+          "service": "controller",
+          "manifest": "/etc/uye-deploy/compose/controller.yml",
+          "health": "healthy"
+        },
+        {
+          "key": "poller",
+          "repo": "ghcr.io/uye-ltd/uye-deployer",
+          "local_tag": "ghcr.io/uye-ltd/uye-deployer:verified",
+          "project": "infra-runner",
+          "service": "deployer",
+          "manifest": "/etc/uye-deploy/compose/poller.yml",
+          "health": "healthy"
+        }
+      ]
+    }{% if uye_deploy_postgres_enabled | bool %},
+    {
+      "name": "infra-postgres",
+      "github_repo": "uye-ltd/infra-postgres",
+      "workflow": "ci.yml",
+      "images": [
+        {
+          "key": "postgres",
+          "repo": "ghcr.io/uye-ltd/postgres",
+          "project": "infra-postgres",
+          "service": "postgres",
+          "manifest": "/etc/uye-deploy/compose/postgres.yml",
+          "health": "healthy"
+        },
+        {
+          "key": "pg-backup",
+          "repo": "ghcr.io/uye-ltd/pg-backup",
+          "project": "infra-postgres",
+          "service": "postgres-backup",
+          "manifest": "/etc/uye-deploy/compose/postgres-backup.yml",
+          "health": "running"
+        }
+      ]
+    }{% endif %}
+  ]
+}

@@ -1,0 +1,25 @@
+services:
+  controller:
+    image: __UYE_VERIFIED_IMAGE__
+    restart: unless-stopped
+    env_file: /etc/uye-deploy/secrets/controller.env
+    volumes:
+      - /etc/uye-deploy/runner-profile.json:/etc/uye-deploy/runner-profile.json:ro
+      - /etc/uye-deploy/secrets/github-app.pem:/run/secrets/github_app_key:ro
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    stop_grace_period: 60s
+    healthcheck:
+      test: [CMD-SHELL, "test $(( $(date +%s) - $(cat /tmp/heartbeat 2>/dev/null || echo 0) )) -lt 300"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks: [controller-proxy-net, controller-net]
+networks:
+  controller-proxy-net:
+    external: true
+    name: infra-runner_controller-proxy-net
+  controller-net:
+    external: true
+    name: infra-runner_controller-net

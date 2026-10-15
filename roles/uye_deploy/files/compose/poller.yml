@@ -1,0 +1,28 @@
+services:
+  deployer:
+    image: __UYE_VERIFIED_IMAGE__
+    restart: unless-stopped
+    user: "65532:65532"
+    environment:
+      HEALTH_PORT: "8080"
+      POLL_INTERVAL: "60"
+      TARGETS_FILE: /etc/uye-poller/targets.json
+    volumes:
+      - /etc/uye-deploy/poller-targets.json:/etc/uye-poller/targets.json:ro
+      - /run/uye-deploy/status.json:/run/uye-deploy/status.json:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports: ["0.0.0.0:8080:8080"]
+    healthcheck:
+      test: [CMD, curl, -sf, http://localhost:8080/health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    networks: [deployer-net]
+networks:
+  deployer-net:
+    external: true
+    name: infra-runner_deployer-net

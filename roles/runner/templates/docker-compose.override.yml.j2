@@ -5,6 +5,3 @@ services:
   controller:
     volumes:
       - {{ runner_github_app_key_dest }}:/run/secrets/github_app_key:ro
-  deployer:
-    volumes:
-      - {{ runner_github_app_key_dest }}:/run/secrets/github_app_key:ro

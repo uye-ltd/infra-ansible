@@ -1,0 +1,29 @@
+name: Deployer migration checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: ansible-galaxy collection install -r requirements.yml
+      - run: ansible-playbook --syntax-check playbooks/deployer-prepare.yml
+      - run: ansible-playbook --syntax-check playbooks/deployer-freeze.yml
+      - run: ansible-playbook --syntax-check playbooks/deployer-cutover.yml
+      - run: ansible-playbook --syntax-check playbooks/postgres.yml
+      - run: ansible-lint playbooks/deployer-prepare.yml playbooks/deployer-freeze.yml playbooks/deployer-cutover.yml playbooks/postgres.yml roles/uye_deploy
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - run: UYE_RUN_DOCKER_INTEGRATION=1 python3 tests/test_integration_executor.py -v

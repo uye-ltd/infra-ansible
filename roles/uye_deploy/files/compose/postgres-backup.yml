@@ -1,0 +1,27 @@
+services:
+  postgres-backup:
+    image: __UYE_VERIFIED_IMAGE__
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      BACKUP_CRON: "0 3 * * *"
+      RETENTION_DAYS: "14"
+      BACKUP_ON_START: "0"
+    volumes: [postgres-backups:/backups]
+    secrets:
+      - source: superuser_password
+        target: superuser_password
+        mode: "0400"
+    networks: [postgres-net]
+secrets:
+  superuser_password:
+    environment: POSTGRES_PASSWORD
+volumes:
+  postgres-backups:
+    external: true
+    name: infra-postgres_postgres-backups
+networks:
+  postgres-net:
+    external: true
+    name: postgres-net

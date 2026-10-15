@@ -1,0 +1,19 @@
+---
+- name: Read existing tenant secret keys
+  ansible.builtin.slurp:
+    src: /etc/uye-deploy/secrets/postgres-tenants.env
+  register: uye_deploy_existing_tenant_env
+  no_log: true
+
+- name: Calculate required tenant secret names
+  ansible.builtin.set_fact:
+    uye_deploy_tenant_prefix: "TENANT_{{ (uye_deploy_tenant_file | basename | regex_replace('\\.conf$', '') | replace('-', '_') | upper) }}"
+  no_log: true
+
+- name: Seed missing tenant passwords
+  ansible.builtin.include_tasks: seed-password.yml
+  loop:
+    - "{{ uye_deploy_tenant_prefix }}_OWNER_PASSWORD"
+    - "{{ uye_deploy_tenant_prefix }}_APP_PASSWORD"
+  loop_control:
+    loop_var: uye_deploy_password_key

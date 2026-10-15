@@ -1,0 +1,217 @@
+---
+- name: Require executor inputs
+  ansible.builtin.assert:
+    that:
+      - runner_github_org == 'uye-ltd'
+      - uye_deploy_runner_github_app.app_id | length > 0
+      - uye_deploy_edge_cert_email | length > 0
+
+- name: Install release verification tools
+  ansible.builtin.apt:
+    name: [cosign, git, python3]
+    state: present
+
+- name: Create trusted executor directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /etc/uye-deploy, mode: '0755'}
+    - {path: /etc/uye-deploy/compose, mode: '0755'}
+    - {path: /etc/uye-deploy/secrets, mode: '0700'}
+    - {path: /etc/uye-deploy/vault-policies, mode: '0755'}
+    - {path: /var/lib/uye-deploy, mode: '0700'}
+    - {path: /var/lib/uye-deploy/rendered, mode: '0700'}
+    - {path: /usr/local/libexec, mode: '0755'}
+
+- name: Install executor code
+  ansible.builtin.copy:
+    src: uye-deploy
+    dest: /usr/local/libexec/uye-deploy
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install dedicated tenant provision helper
+  ansible.builtin.copy:
+    src: uye-postgres-provision
+    dest: /usr/local/libexec/uye-postgres-provision
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install Vault policy snapshot from Ansible checkout
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/uye-deploy/vault-policies/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ lookup('ansible.builtin.fileglob', playbook_dir + '/../../infra-vault/vault/policies/*.hcl', wantlist=True) }}"
+
+- name: Find old Vault policy snapshot files
+  ansible.builtin.find:
+    paths: /etc/uye-deploy/vault-policies
+    patterns: '*.hcl'
+    file_type: file
+  register: uye_deploy_old_policies
+
+- name: Remove policies removed from Ansible snapshot
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ uye_deploy_old_policies.files }}"
+  when: >-
+    item.path | basename not in
+    (lookup('ansible.builtin.fileglob', playbook_dir + '/../../infra-vault/vault/policies/*.hcl', wantlist=True) | map('basename') | list)
+
+- name: Install trusted Compose manifests
+  ansible.builtin.copy:
+    src: "compose/{{ item }}"
+    dest: "/etc/uye-deploy/compose/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - edge.yml
+    - vault-unseal.yml
+    - portainer.yml
+    - controller.yml
+    - poller.yml
+    - postgres.yml
+    - postgres-backup.yml
+
+- name: Install executor allowlist
+  ansible.builtin.template:
+    src: targets.json.j2
+    dest: /etc/uye-deploy/targets.json
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install public poller targets
+  ansible.builtin.template:
+    src: poller-targets.json.j2
+    dest: /etc/uye-deploy/poller-targets.json
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install controller environment from Ansible inventory
+  ansible.builtin.template:
+    src: controller.env.j2
+    dest: /etc/uye-deploy/secrets/controller.env
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Install edge environment from Ansible inventory
+  ansible.builtin.template:
+    src: edge.env.j2
+    dest: /etc/uye-deploy/secrets/edge.env
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Install runner seccomp profile from Ansible checkout
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../infra-runner/seccomp/runner-profile.json"
+    dest: /etc/uye-deploy/runner-profile.json
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Check whether server-only credentials were already migrated
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/uye-deploy/secrets/vault-token
+    - /etc/uye-deploy/secrets/vault-unseal-key
+    - /etc/uye-deploy/secrets/github-app.pem
+  register: uye_deploy_migrated_secret_files
+  no_log: true
+
+- name: Require a complete migrated credential set
+  ansible.builtin.assert:
+    that:
+      - (uye_deploy_migrated_secret_files.results | selectattr('stat.exists') | list | length) in [0, 3]
+    fail_msg: Partial migrated credential set; inspect /etc/uye-deploy/secrets
+  no_log: true
+
+- name: Read existing server-only credentials for migration
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - "{{ uye_deploy_runner_dir }}/.env"
+    - "{{ uye_deploy_vault_dir }}/docker/.env"
+    - /home/ghrunner/.ssh/github-app.pem
+  register: uye_deploy_existing_secrets
+  no_log: true
+  when: not uye_deploy_migrated_secret_files.results[0].stat.exists
+
+- name: Parse existing Vault credentials without shell sourcing
+  ansible.builtin.set_fact:
+    uye_deploy_vault_token: >-
+      {{ (uye_deploy_existing_secrets.results[0].content | b64decode
+      | regex_findall('(?m)^VAULT_TOKEN=([^\r\n]+)$')) | first | default('') }}
+    uye_deploy_unseal_key: >-
+      {{ (uye_deploy_existing_secrets.results[1].content | b64decode
+      | regex_findall('(?m)^VAULT_UNSEAL_KEY=([^\r\n]+)$')) | first | default('') }}
+  no_log: true
+  when: not uye_deploy_migrated_secret_files.results[0].stat.exists
+
+- name: Require existing Vault credentials
+  ansible.builtin.assert:
+    that:
+      - uye_deploy_vault_token | length > 0
+      - uye_deploy_unseal_key | length > 0
+    fail_msg: Existing Vault credentials were not found in the expected server files
+  no_log: true
+  when: not uye_deploy_migrated_secret_files.results[0].stat.exists
+
+- name: Install migrated Vault credentials and App key
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: '0600'
+  loop:
+    - {path: /etc/uye-deploy/secrets/vault-token, content: "{{ uye_deploy_vault_token }}"}
+    - {path: /etc/uye-deploy/secrets/vault-unseal-key, content: "{{ uye_deploy_unseal_key }}"}
+    - {path: /etc/uye-deploy/secrets/github-app.pem, content: "{{ uye_deploy_existing_secrets.results[2].content | b64decode }}"}
+  no_log: true
+  when: not uye_deploy_migrated_secret_files.results[0].stat.exists
+
+- name: Install executor systemd units
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - {src: uye-deploy.service, dest: /etc/systemd/system/uye-deploy.service}
+    - {src: uye-deploy.timer, dest: /etc/systemd/system/uye-deploy.timer}
+    - {src: uye-deploy.tmpfiles, dest: /etc/tmpfiles.d/uye-deploy.conf}
+
+- name: Create public status directory and file
+  ansible.builtin.command:
+    argv: [systemd-tmpfiles, --create, /etc/tmpfiles.d/uye-deploy.conf]
+  changed_when: false
+
+- name: Keep executor timer disabled until cutover is verified
+  ansible.builtin.systemd_service:
+    name: uye-deploy.timer
+    daemon_reload: true
+    enabled: "{{ uye_deploy_timer_enabled | bool }}"
+    state: "{{ (uye_deploy_timer_enabled | bool) | ternary('started', 'stopped') }}"
+
+- name: Install Postgres provision inputs when enabled
+  ansible.builtin.include_tasks: postgres.yml
+  when: uye_deploy_postgres_enabled | bool

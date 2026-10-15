@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: __UYE_VERIFIED_IMAGE__
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/superuser_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command: ["-c", "config_file=/etc/postgresql/postgresql.conf"]
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    secrets:
+      - source: superuser_password
+        target: superuser_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    healthcheck:
+      test: >-
+        CMD-SHELL password=$$(cat /run/secrets/superuser_password) &&
+        result=$$(PGPASSWORD=$$password psql -X -q -At -h 127.0.0.1
+        -U postgres -d postgres -c 'SELECT 1') && [ "$$result" = 1 ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [postgres-net]
+secrets:
+  superuser_password:
+    environment: POSTGRES_PASSWORD
+volumes:
+  postgres-data:
+    external: true
+    name: infra-postgres_postgres-data
+networks:
+  postgres-net:
+    external: true
+    name: postgres-net

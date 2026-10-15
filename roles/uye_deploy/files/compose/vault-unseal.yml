@@ -1,0 +1,16 @@
+services:
+  vault-unseal:
+    image: __UYE_VERIFIED_IMAGE__
+    container_name: vault-unseal
+    restart: unless-stopped
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_UNSEAL_KEY_FILE: /run/secrets/vault-unseal-key
+      INTERVAL: "15"
+    volumes:
+      - /etc/uye-deploy/secrets/vault-unseal-key:/run/secrets/vault-unseal-key:ro
+    networks: [vault-net]
+networks:
+  vault-net:
+    external: true
+    name: vault-net

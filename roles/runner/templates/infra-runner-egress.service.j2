@@ -8,7 +8,7 @@ PartOf=docker.service
 Type=oneshot
 RemainAfterExit=yes
 Environment=PERSIST=0 RUNNER_SUBNET={{ runner_subnet }}
-ExecStart={{ runner_repo_dest }}/scripts/setup-egress-policy.sh
+ExecStart=/usr/local/libexec/infra-runner-egress-policy
 
 [Install]
 WantedBy=docker.service

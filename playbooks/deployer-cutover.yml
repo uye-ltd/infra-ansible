@@ -1,0 +1,166 @@
+---
+- name: Migrate existing services to the signed release executor
+  hosts: servers
+  become: true
+  vars:
+    uye_deploy_timer_enabled: false
+    uye_deploy_postgres_enabled: false
+  tasks:
+    - name: Stop executor timer during cutover
+      ansible.builtin.systemd_service:
+        name: uye-deploy.timer
+        state: stopped
+
+    - name: Check no executor run is already in progress
+      ansible.builtin.command:
+        argv: [systemctl, is-active, uye-deploy.service]
+      register: uye_cutover_executor_service
+      changed_when: false
+      failed_when: false
+
+    - name: Require an idle executor before preflight
+      ansible.builtin.assert:
+        that: uye_cutover_executor_service.stdout != 'active'
+
+    - name: Require installed executor and fixed target table
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/local/libexec/uye-deploy
+        - /etc/uye-deploy/targets.json
+        - /etc/uye-deploy/compose/controller.yml
+      register: uye_cutover_files
+
+    - name: Refuse cutover if preparation is incomplete
+      ansible.builtin.assert:
+        that: uye_cutover_files.results | map(attribute='stat.exists') | min
+
+    - name: Verify all release groups before touching running containers
+      ansible.builtin.command:
+        argv: [/usr/local/libexec/uye-deploy, --check]
+      changed_when: false
+
+    - name: Read current required Compose resources
+      ansible.builtin.command:
+        argv: [docker, "{{ item.kind }}", inspect, "{{ item.name }}"]
+      loop:
+        - {kind: network, name: vault-net}
+        - {kind: network, name: portainer-net}
+        - {kind: network, name: infra-runner_controller-proxy-net}
+        - {kind: network, name: infra-runner_controller-net}
+        - {kind: network, name: infra-runner_deployer-net}
+        - {kind: volume, name: infra-vault_vault-data}
+        - {kind: volume, name: infra-portainer_portainer-data}
+        - {kind: volume, name: infra-edge_certbot_certs}
+      changed_when: false
+
+    - name: Inspect existing managed containers and labels
+      ansible.builtin.command:
+        argv: [docker, inspect, "{{ item.name }}"]
+      loop:
+        - {name: vault-unseal, project: infra-vault, service: vault-unseal, network: vault-net}
+        - {name: uye-edge, project: infra-edge, service: nginx, network: host, volume: infra-edge_certbot_certs}
+        - {name: portainer, project: infra-portainer, service: portainer, network: portainer-net, volume: infra-portainer_portainer-data}
+        - {name: infra-runner-controller-1, project: infra-runner, service: controller, network: infra-runner_controller-net}
+        - {name: infra-runner-deployer-1, project: infra-runner, service: deployer, network: infra-runner_deployer-net}
+      register: uye_existing_containers
+      changed_when: false
+
+    - name: Require exact existing Compose ownership
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | from_json)[0].Config.Labels['com.docker.compose.project'] == item.item.project
+          - (item.stdout | from_json)[0].Config.Labels['com.docker.compose.service'] == item.item.service
+          - item.item.service == 'deployer' or (item.stdout | from_json)[0].State.Running
+          - >-
+            item.item.service == 'deployer' or
+            item.item.network in ((item.stdout | from_json)[0].NetworkSettings.Networks | default({}))
+          - >-
+            item.item.volume is not defined or
+            item.item.volume in ((item.stdout | from_json)[0].Mounts
+            | selectattr('Type', 'equalto', 'volume') | map(attribute='Name') | list)
+      loop: "{{ uye_existing_containers.results }}"
+
+    - name: Fast-forward server runner checkout without discarding local files
+      ansible.builtin.git:
+        repo: https://github.com/uye-ltd/infra-runner.git
+        dest: /home/ghrunner/infra-runner
+        version: main
+        update: true
+        force: false
+      become: true
+      become_user: ghrunner
+
+    - name: Read published runner Compose file
+      ansible.builtin.slurp:
+        src: /home/ghrunner/infra-runner/docker-compose.yml
+      register: uye_cutover_runner_compose
+
+    - name: Require the Dockerless poller release in the server checkout
+      ansible.builtin.assert:
+        that:
+          - "'deployer-proxy:' not in (uye_cutover_runner_compose.content | b64decode)"
+          - "'env_file: .env' not in (uye_cutover_runner_compose.content | b64decode)"
+          - "'TARGETS_FILE: /etc/uye-poller/targets.json' in (uye_cutover_runner_compose.content | b64decode)"
+
+    - name: Stop legacy deployer before any executor mutation
+      ansible.builtin.command:
+        argv: [docker, stop, infra-runner-deployer-1]
+      when: (uye_existing_containers.results[4].stdout | from_json)[0].State.Running
+      changed_when: true
+
+    - name: Transfer existing release groups one at a time
+      ansible.builtin.command:
+        argv: [/usr/local/libexec/uye-deploy, --target, "{{ item }}"]
+      loop: [infra-vault, infra-edge, infra-portainer, infra-runner]
+      changed_when: true
+
+    - name: Keep future runner Compose runs on the safe base and controller override
+      ansible.builtin.lineinfile:
+        path: /home/ghrunner/infra-runner/.env
+        regexp: '^COMPOSE_FILE='
+        line: COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml
+      no_log: true
+
+    - name: Remove legacy plugin secrets and paths from runner environment
+      ansible.builtin.lineinfile:
+        path: /home/ghrunner/infra-runner/.env
+        regexp: "^{{ item }}="
+        state: absent
+      loop:
+        - VAULT_TOKEN
+        - VAULT_COMPOSE_DIR
+        - VAULT_ADDR
+        - VAULT_NET
+        - POSTGRES_COMPOSE_DIR
+        - POSTGRES_SECRETS_GID
+        - POSTGRES_NET
+      no_log: true
+
+    - name: Remove the migrated unseal key from the legacy Vault checkout environment
+      ansible.builtin.lineinfile:
+        path: /home/ghrunner/infra-vault/docker/.env
+        regexp: '^VAULT_UNSEAL_KEY='
+        state: absent
+      no_log: true
+
+    - name: Remove the obsolete deployer Docker API proxy
+      ansible.builtin.command:
+        argv: [docker, rm, -f, infra-runner-deployer-proxy-1]
+      register: uye_cutover_old_proxy
+      failed_when: uye_cutover_old_proxy.rc != 0 and 'No such container' not in uye_cutover_old_proxy.stderr
+      changed_when: uye_cutover_old_proxy.rc == 0
+
+    - name: Remove the obsolete deployer proxy network
+      ansible.builtin.command:
+        argv: [docker, network, rm, infra-runner_deployer-proxy-net]
+      register: uye_cutover_old_network
+      failed_when: uye_cutover_old_network.rc != 0 and 'not found' not in uye_cutover_old_network.stderr
+      changed_when: uye_cutover_old_network.rc == 0
+
+    - name: Enable executor timer only after successful transfer
+      ansible.builtin.systemd_service:
+        name: uye-deploy.timer
+        enabled: true
+        state: started
+        daemon_reload: true

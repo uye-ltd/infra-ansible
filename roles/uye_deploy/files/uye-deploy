@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+"""Root-owned release reconciler. The poller has no command channel to it."""
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+CONFIG = Path("/etc/uye-deploy/targets.json")
+COMPOSE_DIR = Path("/etc/uye-deploy/compose")
+STATE = Path("/var/lib/uye-deploy")
+STATUS = Path("/run/uye-deploy/status.json")
+SHA = re.compile(r"[0-9a-f]{40}")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/var/lib/uye-deploy", "LANG": "C"}
+
+
+class DeployError(Exception):
+    pass
+
+
+def trusted(path, is_dir=False):
+    path = Path(path)
+    for part in (path, *path.parents):
+        info = part.lstat()
+        if part.is_symlink() or info.st_uid != 0 or info.st_mode & 0o022:
+            raise DeployError(f"unsafe trusted path: {part}")
+    if is_dir != path.is_dir():
+        raise DeployError(f"wrong trusted path type: {path}")
+
+
+def run(args, input_text=None, extra_env=None):
+    clean_env = dict(ENV)
+    if extra_env:
+        if set(extra_env) != {"POSTGRES_PASSWORD"}:
+            raise DeployError("unexpected executor environment")
+        clean_env.update(extra_env)
+    try:
+        result = subprocess.run(args, input=input_text, text=True, capture_output=True,
+                                env=clean_env, timeout=180)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise DeployError(f"{args[0]} unavailable or timed out") from exc
+    if result.returncode:
+        raise DeployError(f"{args[0]} failed ({result.returncode})")
+    return result.stdout
+
+
+def valid_sha(value):
+    if not isinstance(value, str) or not SHA.fullmatch(value):
+        raise DeployError("invalid commit SHA")
+    return value
+
+
+def valid_digest(value):
+    if not isinstance(value, str) or not DIGEST.fullmatch(value):
+        raise DeployError("invalid image digest")
+    return value
+
+
+def atomic_write(path, data, mode=0o600):
+    trusted(path.parent, True)
+    fd, temporary = tempfile.mkstemp(prefix=".uye-", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def read_json(path):
+    trusted(path)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def head(repo):
+    parts = run(["git", "ls-remote", f"https://github.com/{repo}.git", "refs/heads/main"]).split()
+    if len(parts) != 2 or parts[1] != "refs/heads/main":
+        raise DeployError("main ref unavailable")
+    return valid_sha(parts[0])
+
+
+def forward(repo, old, new):
+    if old == new:
+        return True
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/compare/{old}...{new}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "uye-deploy"},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        result = json.load(response)
+    return result.get("status") == "ahead" and result.get("merge_base_commit", {}).get("sha") == old
+
+
+def signature(image, ref, identity):
+    target = f"{image}@{ref}" if ref.startswith("sha256:") else f"{image}:{ref}"
+    raw = run(["cosign", "verify", "--certificate-identity", identity,
+               "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", target])
+    try:
+        values = {item["critical"]["image"]["docker-manifest-digest"] for item in json.loads(raw)}
+    except (ValueError, KeyError, TypeError) as exc:
+        raise DeployError("invalid cosign response") from exc
+    if len(values) != 1:
+        raise DeployError("cosign returned multiple or no digests")
+    return valid_digest(values.pop())
+
+
+def allowlist():
+    groups = read_json(CONFIG)["groups"]
+    names = set()
+    for group in groups:
+        name, repo, workflow = group["name"], group["github_repo"], group["workflow"]
+        if name in names or not re.fullmatch(r"[a-z0-9-]+", name):
+            raise DeployError("invalid group name")
+        names.add(name)
+        if not re.fullmatch(r"uye-ltd/[a-z0-9-]+", repo) or workflow not in ("ci.yml", "deploy.yml"):
+            raise DeployError("invalid GitHub source")
+        if not group["images"]:
+            raise DeployError("empty release group")
+        keys = set()
+        for item in group["images"]:
+            key = item["key"]
+            if key in keys or not re.fullmatch(r"[a-z0-9-]+", key):
+                raise DeployError("invalid image key")
+            keys.add(key)
+            if not re.fullmatch(r"ghcr\.io/uye-ltd/[a-z0-9-]+", item["repo"]):
+                raise DeployError("image outside GHCR allowlist")
+            if "service" in item:
+                for field in ("project", "service"):
+                    if not re.fullmatch(r"[a-z0-9-]+", item[field]):
+                        raise DeployError("invalid Compose target")
+                manifest = Path(item["manifest"])
+                if not str(manifest).startswith("/etc/uye-deploy/compose/"):
+                    raise DeployError("manifest outside trusted directory")
+                trusted(manifest)
+    return groups
+
+
+def pull_and_inspect(image, release_digest, revision):
+    reference = f"{image}@{release_digest}"
+    run(["docker", "pull", reference])
+    try:
+        info = json.loads(run(["docker", "image", "inspect", reference]))[0]
+        image_id = valid_digest(info["Id"])
+        label = (info.get("Config", {}).get("Labels") or {}).get("org.opencontainers.image.revision")
+        repo_digests = info["RepoDigests"]
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        raise DeployError("invalid Docker image inspect") from exc
+    if label != revision or reference not in repo_digests:
+        raise DeployError("image revision or digest mismatch")
+    return image_id
+
+
+def container(project, service):
+    ids = run(["docker", "ps", "-q", "--filter", "status=running",
+               "--filter", f"label=com.docker.compose.project={project}",
+               "--filter", f"label=com.docker.compose.service={service}"]).split()
+    if len(ids) != 1:
+        raise DeployError("expected exactly one running Compose container")
+    info = json.loads(run(["docker", "inspect", ids[0]]))[0]
+    labels = info["Config"]["Labels"]
+    if labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service:
+        raise DeployError("Compose labels mismatch")
+    return info
+
+
+def healthy(item, image_id, timeout=180):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            info = container(item["project"], item["service"])
+            health = info["State"].get("Health", {}).get("Status")
+            if info["Image"] == image_id and (item.get("health") == "running" or health == "healthy"):
+                return
+        except (DeployError, ValueError, KeyError):
+            pass
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(3)
+    raise DeployError(f"{item['project']}/{item['service']} failed image or health check")
+
+
+def deploy(item, release_digest, image_id, rollback=None):
+    template = Path(item["manifest"]).read_text(encoding="utf-8")
+    if template.count("__UYE_VERIFIED_IMAGE__") != 1 or "${" in template:
+        raise DeployError("invalid trusted Compose template")
+    rendered = STATE / "rendered" / f"{item['project']}-{item['service']}.yml"
+    atomic_write(rendered, template.replace("__UYE_VERIFIED_IMAGE__", f"{item['repo']}@{release_digest}"))
+    argv = ["docker", "compose", "--project-name", item["project"],
+            "--project-directory", str(COMPOSE_DIR), "-f", str(rendered),
+            "up", "-d", "--no-deps", "--no-build", "--pull", "never", item["service"]]
+    extra_env = None
+    if item["project"] == "infra-postgres":
+        secret = Path("/etc/uye-deploy/secrets/postgres-superuser")
+        trusted(secret)
+        password = secret.read_text(encoding="utf-8").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", password):
+            raise DeployError("invalid Postgres secret")
+        extra_env = {"POSTGRES_PASSWORD": password}
+    try:
+        run(argv, extra_env=extra_env)
+        healthy(item, image_id)
+    except DeployError:
+        if rollback:
+            old_digest, old_id = rollback
+            atomic_write(rendered, template.replace("__UYE_VERIFIED_IMAGE__", f"{item['repo']}@{old_digest}"))
+            try:
+                run(argv, extra_env=extra_env)
+                healthy(item, old_id)
+            except DeployError as exc:
+                raise DeployError("update failed; signed rollback also failed") from exc
+            raise DeployError("update failed; previous signed digest restored")
+        raise
+
+
+def previous_image(item, identity):
+    """Capture a signed running image before any Compose mutation."""
+    try:
+        info = container(item["project"], item["service"])
+    except DeployError:
+        return None
+    image_id = valid_digest(info["Image"])
+    image_info = json.loads(run(["docker", "image", "inspect", image_id]))[0]
+    prefix = item["repo"] + "@"
+    candidates = [ref[len(prefix):] for ref in image_info.get("RepoDigests", []) if ref.startswith(prefix)]
+    if len(candidates) != 1:
+        raise DeployError("running image has no unique rollback digest")
+    old = valid_digest(candidates[0])
+    if signature(item["repo"], old, identity) != old:
+        raise DeployError("running image rollback digest is not signed")
+    return old, image_id
+
+
+def vault_sync():
+    token_path = Path("/etc/uye-deploy/secrets/vault-token")
+    trusted(token_path)
+    token = token_path.read_text(encoding="utf-8").strip()
+    if not token or "\n" in token:
+        raise DeployError("invalid Vault token file")
+    cli = "hashicorp/vault@sha256:74a4ab138ab5d64725e89cd9a9c73f7040c7fe49e98b71697b275ca9a69919df"
+    run(["docker", "pull", cli])
+    script = ('IFS= read -r VAULT_TOKEN; export VAULT_TOKEN; '
+              'for f in /policies/*.hcl; do [ -f "$f" ] || continue; '
+              'name=$(basename "$f" .hcl); vault policy write "$name" "$f" || exit 1; done')
+    run(["docker", "run", "--rm", "-i", "--pull", "never", "--read-only",
+         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+         "--network", "vault-net", "-e", "VAULT_ADDR=http://vault:8200",
+         "-v", "/etc/uye-deploy/vault-policies:/policies:ro",
+         "--entrypoint", "/bin/sh", cli, "-ec", script], token + "\n")
+
+
+def postgres_provision():
+    run(["/usr/sbin/runuser", "-u", "uye-postgres-provision", "--",
+         "/usr/local/libexec/uye-postgres-provision"])
+
+
+def reconcile(group, check=False):
+    repo = group["github_repo"]
+    release = head(repo)
+    state_file = STATE / f"{group['name']}.json"
+    previous = read_json(state_file) if state_file.exists() else None
+    if previous and not forward(repo, valid_sha(previous["sha"]), release):
+        raise DeployError("main is not a fast-forward of accepted release")
+    identity = f"https://github.com/{repo}/.github/workflows/{group['workflow']}@refs/heads/main"
+    digests = {}
+    for item in group["images"]:
+        current = signature(item["repo"], release, identity)
+        if signature(item["repo"], "latest", identity) != current:
+            raise DeployError("latest does not match main SHA")
+        if signature(item["repo"], current, identity) != current:
+            raise DeployError("digest signature mismatch")
+        digests[item["key"]] = current
+    if previous and previous["sha"] == release and previous["digests"] != digests:
+        raise DeployError("accepted SHA tag was retargeted")
+    ids = {item["key"]: pull_and_inspect(item["repo"], digests[item["key"]], release)
+           for item in group["images"]}
+    if check:
+        for item in group["images"]:
+            if "service" in item:
+                previous_image(item, identity)
+        return {"sha": release, "digests": digests, "result": "verified"}
+    if head(repo) != release:
+        raise DeployError("main changed during cycle")
+    for item in group["images"]:
+        if signature(item["repo"], release, identity) != digests[item["key"]] or signature(item["repo"], "latest", identity) != digests[item["key"]]:
+            raise DeployError("release tag changed during cycle")
+    applied = []
+    try:
+        for item in group["images"]:
+            if "service" not in item:
+                continue
+            try:
+                healthy(item, ids[item["key"]], timeout=0)
+            except DeployError:
+                rollback = previous_image(item, identity)
+                deploy(item, digests[item["key"]], ids[item["key"]], rollback)
+                applied.append((item, rollback))
+        if group["name"] == "infra-vault":
+            vault_sync()
+        elif group["name"] == "infra-postgres":
+            postgres_provision()
+        for item in group["images"]:
+            if "local_tag" in item:
+                run(["docker", "tag", f"{item['repo']}@{digests[item['key']]}", item["local_tag"]])
+    except DeployError as exc:
+        rollback_failed = False
+        for item, rollback in reversed(applied):
+            if rollback:
+                old_digest, old_id = rollback
+                try:
+                    deploy(item, old_digest, old_id)
+                except DeployError:
+                    rollback_failed = True
+        if rollback_failed:
+            raise DeployError("release failed; signed group rollback incomplete") from exc
+        raise
+    atomic_write(state_file, json.dumps({"sha": release, "digests": digests, "accepted_at": int(time.time())}) + "\n")
+    return {"sha": release, "digests": digests, "result": "ok"}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--audit-current", action="store_true")
+    parser.add_argument("--target")
+    args = parser.parse_args()
+    if args.check and args.audit_current:
+        raise DeployError("choose one read-only mode")
+    if os.geteuid() != 0:
+        raise DeployError("executor requires root")
+    os.environ.clear()
+    os.environ.update(ENV)
+    for path in (STATE, STATE / "rendered", STATUS.parent):
+        trusted(path, True)
+    groups = allowlist()
+    if args.target:
+        groups = [item for item in groups if item["name"] == args.target]
+        if not groups:
+            raise DeployError("unknown target")
+    lock = os.open(STATE / "lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise DeployError("executor already running") from exc
+    results = {}
+    for group in groups:
+        try:
+            if args.audit_current:
+                identity = (f"https://github.com/{group['github_repo']}/.github/workflows/"
+                            f"{group['workflow']}@refs/heads/main")
+                for item in group["images"]:
+                    if "service" in item and previous_image(item, identity) is None:
+                        raise DeployError("managed service is not running")
+                results[group["name"]] = {"result": "verified-current"}
+            else:
+                results[group["name"]] = reconcile(group, args.check)
+        except Exception as exc:
+            results[group["name"]] = {"result": "error", "reason": str(exc)}
+    atomic_write(STATUS, json.dumps({"checked_at": int(time.time()), "targets": results}, sort_keys=True) + "\n", 0o644)
+    print(json.dumps(results, sort_keys=True))
+    return int(any(item["result"] == "error" for item in results.values()))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (DeployError, OSError, ValueError) as exc:
+        print(f"uye-deploy: {exc}", file=sys.stderr)
+        sys.exit(1)

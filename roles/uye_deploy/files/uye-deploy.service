@@ -1,0 +1,12 @@
+[Unit]
+Description=Reconcile signed UYE images
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/uye-deploy
+TimeoutStartSec=900
+NoNewPrivileges=yes
+UMask=0077

@@ -1,0 +1,28 @@
+services:
+  nginx:
+    image: __UYE_VERIFIED_IMAGE__
+    container_name: uye-edge
+    restart: unless-stopped
+    network_mode: host
+    env_file: /etc/uye-deploy/secrets/edge.env
+    volumes:
+      - certbot_certs:/etc/nginx/ssl:ro
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, CHOWN, SETUID, SETGID]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp:uid=101,gid=101
+      - /etc/nginx/generated
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost/healthz]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+volumes:
+  certbot_certs:
+    external: true
+    name: infra-edge_certbot_certs

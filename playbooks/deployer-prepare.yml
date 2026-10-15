@@ -1,0 +1,20 @@
+---
+- name: Install signed release executor without enabling it
+  hosts: servers
+  become: true
+  vars:
+    uye_deploy_timer_enabled: false
+    uye_deploy_postgres_enabled: false
+  roles:
+    - uye_deploy
+  tasks:
+    - name: Verify fixed Compose manifests can be parsed
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ item.project }}", -f, "{{ item.file }}", config, --no-env-resolution, --quiet]
+      loop:
+        - {project: infra-edge, file: /etc/uye-deploy/compose/edge.yml}
+        - {project: infra-vault, file: /etc/uye-deploy/compose/vault-unseal.yml}
+        - {project: infra-portainer, file: /etc/uye-deploy/compose/portainer.yml}
+        - {project: infra-runner, file: /etc/uye-deploy/compose/controller.yml}
+        - {project: infra-runner, file: /etc/uye-deploy/compose/poller.yml}
+      changed_when: false

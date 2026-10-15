@@ -1,0 +1,35 @@
+---
+# Run only after CI-only Edge and Portainer releases have become the running images.
+# This stops legacy self-update before the Dockerless runner image is published.
+- name: Freeze legacy deployer after signed rollback preflight
+  hosts: servers
+  become: true
+  tasks:
+    - name: Keep new executor timer stopped
+      ansible.builtin.systemd_service:
+        name: uye-deploy.timer
+        state: stopped
+
+    - name: Require signed running Edge and Portainer images
+      ansible.builtin.command:
+        argv: [/usr/local/libexec/uye-deploy, --audit-current, --target, "{{ item }}"]
+      loop: [infra-edge, infra-portainer]
+      changed_when: false
+
+    - name: Read legacy deployer state
+      ansible.builtin.command:
+        argv: [docker, inspect, infra-runner-deployer-1]
+      register: uye_freeze_legacy
+      changed_when: false
+
+    - name: Require the expected old Compose service
+      ansible.builtin.assert:
+        that:
+          - (uye_freeze_legacy.stdout | from_json)[0].Config.Labels['com.docker.compose.project'] == 'infra-runner'
+          - (uye_freeze_legacy.stdout | from_json)[0].Config.Labels['com.docker.compose.service'] == 'deployer'
+
+    - name: Stop legacy self-update before publishing the new poller
+      ansible.builtin.command:
+        argv: [docker, stop, infra-runner-deployer-1]
+      when: (uye_freeze_legacy.stdout | from_json)[0].State.Running
+      changed_when: true

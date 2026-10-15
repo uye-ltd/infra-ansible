@@ -1,0 +1,2 @@
+d /run/uye-deploy 0755 root root -
+f /run/uye-deploy/status.json 0644 root root -

@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Apply trusted tenant snapshots without Docker access or secret arguments."""
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path("/etc/uye-deploy/postgres")
+SECRETS = Path("/etc/uye-deploy/secrets/postgres-tenants.env")
+PASSWORD = re.compile(r"[0-9a-f]{64}")
+NAME = re.compile(r"[a-z][a-z0-9-]{0,47}")
+
+
+def fail(message):
+    raise ValueError(message)
+
+
+def passwords(keys):
+    info = SECRETS.lstat()
+    if SECRETS.is_symlink() or info.st_uid != 0 or info.st_mode & 0o777 != 0o640:
+        fail("invalid tenant secret file mode or owner")
+    found = {}
+    for line in SECRETS.read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"([A-Z][A-Z0-9_]*)=(.*)", line)
+        if not match or match[1] not in keys:
+            continue
+        if match[1] in found or not PASSWORD.fullmatch(match[2]):
+            fail("invalid or duplicate tenant secret")
+        found[match[1]] = match[2]
+    if set(found) != set(keys):
+        fail("missing tenant secret")
+    return found
+
+
+def descriptor(path):
+    name = path.stem
+    if not NAME.fullmatch(name) or name.endswith("-") or name.replace("-", "_") in ("postgres", "template0", "template1"):
+        fail("invalid tenant name")
+    if path.is_symlink() or path.stat().st_uid != 0 or path.stat().st_mode & 0o022:
+        fail("unsafe tenant descriptor")
+    extensions, limit = "", "20"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = re.fullmatch(r"([A-Z_]+)=(.*)", line)
+        if not match:
+            fail("malformed tenant descriptor")
+        key, value = match.groups()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        if key == "EXTENSIONS" and re.fullmatch(r"[a-z0-9_ ]*", value):
+            extensions = value
+        elif key == "CONNECTION_LIMIT" and re.fullmatch(r"-1|[0-9]+", value):
+            limit = value
+        else:
+            fail("invalid tenant descriptor value")
+    return name, name.replace("-", "_"), extensions, limit
+
+
+def psql(args, env):
+    result = subprocess.run(
+        ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", "127.0.0.1",
+         "-U", "postgres", "-d", "postgres", *args],
+        env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        timeout=180, check=False,
+    )
+    if result.returncode:
+        fail("psql failed")
+    return result.stdout
+
+
+def main():
+    sql = ROOT / "tenant.sql"
+    if sql.is_symlink() or sql.stat().st_uid != 0 or sql.stat().st_mode & 0o022:
+        fail("unsafe tenant SQL snapshot")
+    descriptors = [descriptor(path) for path in sorted((ROOT / "tenants").glob("*.conf"))]
+    keys = ["POSTGRES_PASSWORD"]
+    for name, _, _, _ in descriptors:
+        prefix = "TENANT_" + name.replace("-", "_").upper()
+        keys.extend((prefix + "_OWNER_PASSWORD", prefix + "_APP_PASSWORD"))
+    secrets = passwords(keys)
+    env = {"PATH": "/usr/bin:/bin", "PGPASSWORD": secrets["POSTGRES_PASSWORD"]}
+    if psql(["-At", "-c", "SELECT 1"], env).strip() != "1":
+        fail("authenticated readiness check failed")
+    for name, database, extensions, limit in descriptors:
+        prefix = "TENANT_" + name.replace("-", "_").upper()
+        tenant_env = dict(env)
+        tenant_env["OWNER_PASSWORD"] = secrets[prefix + "_OWNER_PASSWORD"]
+        tenant_env["APP_PASSWORD"] = secrets[prefix + "_APP_PASSWORD"]
+        psql(["-v", f"db={database}", "-v", f"extensions={extensions}",
+              "-v", f"connection_limit={limit}", "-f", str(sql)], tenant_env)
+    print(f"applied {len(descriptors)} tenant(s)")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        print(f"tenant provision failed: {exc}", file=sys.stderr)
+        sys.exit(1)

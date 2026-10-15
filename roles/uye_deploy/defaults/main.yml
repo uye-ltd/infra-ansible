@@ -1,0 +1,16 @@
+---
+uye_deploy_postgres_enabled: false
+uye_deploy_timer_enabled: false
+uye_deploy_runner_dir: /home/ghrunner/infra-runner
+uye_deploy_vault_dir: /home/ghrunner/infra-vault
+uye_deploy_runner_github_app: "{{ git_github_app }}"
+uye_deploy_runner_labels: self-hosted,linux,x64
+uye_deploy_runner_desired_idle: "2"
+uye_deploy_runner_memory: 6g
+uye_deploy_runner_runtime: ""
+uye_deploy_runner_kata_dns: 1.1.1.1
+uye_deploy_runner_cpus: "2"
+uye_deploy_runner_kaniko_size: 2g
+uye_deploy_runner_apparmor_profile: infra-runner
+uye_deploy_runner_controller_poll_interval: "15"
+uye_deploy_edge_cert_email: "{{ caddy_acme_email | default('') }}"

@@ -1,11 +1,11 @@
 ---
-- name: Replace Caddy with signed infra-edge
+- name: Reject retired plugin deployment procedure
   hosts: servers
-  become: true
-  roles:
-    - edge
+  gather_facts: false
   tasks:
-    - name: Switch public ports to infra-edge
-      ansible.builtin.import_role:
-        name: edge
-        tasks_from: cutover
+    - name: Use the signed executor migration instead
+      ansible.builtin.fail:
+        msg: >-
+          This legacy playbook could restore deployer plugin mounts or an unverified
+          Compose update. Use deployer-prepare.yml and deployer-cutover.yml;
+          perform explicit signed-digest rollback through the executor procedure.

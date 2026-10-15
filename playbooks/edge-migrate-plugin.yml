@@ -1,9 +1,11 @@
 ---
-- name: Move the active infra-edge plugin mount to deploy/
+- name: Reject retired plugin deployment procedure
   hosts: servers
-  become: true
+  gather_facts: false
   tasks:
-    - name: Migrate the runner overlay without changing edge traffic
-      ansible.builtin.import_role:
-        name: edge
-        tasks_from: migrate-plugin
+    - name: Use the signed executor migration instead
+      ansible.builtin.fail:
+        msg: >-
+          This legacy playbook could restore deployer plugin mounts or an unverified
+          Compose update. Use deployer-prepare.yml and deployer-cutover.yml;
+          perform explicit signed-digest rollback through the executor procedure.

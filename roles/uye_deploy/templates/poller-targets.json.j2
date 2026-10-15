@@ -1,0 +1,12 @@
+{
+  "targets": [
+    {"name": "infra-vault", "repo": "ghcr.io/uye-ltd/vault-unseal", "identity": "https://github.com/uye-ltd/infra-vault/.github/workflows/ci.yml@refs/heads/main"},
+    {"name": "infra-edge", "repo": "ghcr.io/uye-ltd/infra-edge", "identity": "https://github.com/uye-ltd/infra-edge/.github/workflows/ci.yml@refs/heads/main"},
+    {"name": "infra-portainer", "repo": "ghcr.io/uye-ltd/portainer", "identity": "https://github.com/uye-ltd/infra-portainer/.github/workflows/ci.yml@refs/heads/main"},
+    {"name": "infra-runner", "repo": "ghcr.io/uye-ltd/infra-runner", "identity": "https://github.com/uye-ltd/infra-runner/.github/workflows/deploy.yml@refs/heads/main"},
+    {"name": "infra-runner", "repo": "ghcr.io/uye-ltd/infra-runner-controller", "identity": "https://github.com/uye-ltd/infra-runner/.github/workflows/deploy.yml@refs/heads/main"},
+    {"name": "infra-runner", "repo": "ghcr.io/uye-ltd/uye-deployer", "identity": "https://github.com/uye-ltd/infra-runner/.github/workflows/deploy.yml@refs/heads/main"}{% if uye_deploy_postgres_enabled | bool %},
+    {"name": "infra-postgres", "repo": "ghcr.io/uye-ltd/postgres", "identity": "https://github.com/uye-ltd/infra-postgres/.github/workflows/ci.yml@refs/heads/main"},
+    {"name": "infra-postgres", "repo": "ghcr.io/uye-ltd/pg-backup", "identity": "https://github.com/uye-ltd/infra-postgres/.github/workflows/ci.yml@refs/heads/main"}{% endif %}
+  ]
+}

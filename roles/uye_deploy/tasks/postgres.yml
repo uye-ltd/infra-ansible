@@ -1,0 +1,143 @@
+---
+- name: Create dedicated tenant job group
+  ansible.builtin.group:
+    name: uye-postgres-provision
+    system: true
+
+- name: Create dedicated tenant job user without Docker group
+  ansible.builtin.user:
+    name: uye-postgres-provision
+    group: uye-postgres-provision
+    groups: ''
+    append: false
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+
+- name: Allow the tenant job to traverse the secret directory
+  ansible.builtin.file:
+    path: /etc/uye-deploy/secrets
+    owner: root
+    group: uye-postgres-provision
+    mode: '0710'
+
+- name: Install PostgreSQL package repository key
+  ansible.builtin.get_url:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    dest: /usr/share/keyrings/postgresql.asc
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install PostgreSQL 18 client repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+    filename: pgdg
+    state: present
+
+- name: Install matching PostgreSQL client
+  ansible.builtin.apt:
+    name: postgresql-client-18
+    state: present
+    update_cache: true
+
+- name: Create trusted Postgres snapshot directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /etc/uye-deploy/postgres
+    - /etc/uye-deploy/postgres/tenants
+
+- name: Install trusted tenant SQL
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../infra-postgres/postgres/tenant.sql"
+    dest: /etc/uye-deploy/postgres/tenant.sql
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install trusted tenant descriptors
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/uye-deploy/postgres/tenants/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ lookup('ansible.builtin.fileglob', playbook_dir + '/../../infra-postgres/postgres/tenants/*.conf', wantlist=True) }}"
+
+- name: Find installed tenant descriptor snapshots
+  ansible.builtin.find:
+    paths: /etc/uye-deploy/postgres/tenants
+    patterns: '*.conf'
+    file_type: file
+  register: uye_deploy_installed_tenants
+
+- name: Remove descriptor snapshots absent from the Ansible checkout
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ uye_deploy_installed_tenants.files }}"
+  when: >-
+    item.path | basename not in
+    (lookup('ansible.builtin.fileglob', playbook_dir + '/../../infra-postgres/postgres/tenants/*.conf', wantlist=True)
+    | map('basename') | list)
+
+- name: Check whether tenant secret file exists
+  ansible.builtin.stat:
+    path: /etc/uye-deploy/secrets/postgres-tenants.env
+  register: uye_deploy_pg_secret
+  no_log: true
+
+- name: Generate initial Postgres password
+  ansible.builtin.command:
+    argv: [openssl, rand, -hex, '32']
+  register: uye_deploy_pg_password
+  when: not uye_deploy_pg_secret.stat.exists
+  changed_when: true
+  no_log: true
+
+- name: Create root-owned tenant secret file once
+  ansible.builtin.copy:
+    content: "POSTGRES_PASSWORD={{ uye_deploy_pg_password.stdout }}\n"
+    dest: /etc/uye-deploy/secrets/postgres-tenants.env
+    owner: root
+    group: uye-postgres-provision
+    mode: '0640'
+    force: false
+  when: not uye_deploy_pg_secret.stat.exists
+  no_log: true
+
+- name: Seed newly declared tenants without changing existing passwords
+  ansible.builtin.include_tasks: seed-tenant.yml
+  loop: "{{ lookup('ansible.builtin.fileglob', playbook_dir + '/../../infra-postgres/postgres/tenants/*.conf', wantlist=True) }}"
+  loop_control:
+    loop_var: uye_deploy_tenant_file
+
+- name: Read tenant secret file for Compose superuser secret
+  ansible.builtin.slurp:
+    src: /etc/uye-deploy/secrets/postgres-tenants.env
+  register: uye_deploy_pg_env
+  no_log: true
+
+- name: Extract superuser password without shell sourcing
+  ansible.builtin.set_fact:
+    uye_deploy_pg_superuser: "{{ (uye_deploy_pg_env.content | b64decode | regex_findall('(?m)^POSTGRES_PASSWORD=([0-9a-f]{64})$')) | first | default('') }}"
+  no_log: true
+
+- name: Require a valid superuser password
+  ansible.builtin.assert:
+    that: uye_deploy_pg_superuser | length == 64
+  no_log: true
+
+- name: Install Compose superuser secret
+  ansible.builtin.copy:
+    content: "{{ uye_deploy_pg_superuser }}\n"
+    dest: /etc/uye-deploy/secrets/postgres-superuser
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
