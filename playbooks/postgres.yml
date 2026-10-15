@@ -1,0 +1,252 @@
+---
+- name: Register and verify infra-postgres with the existing GitOps deployer
+  hosts: servers
+  become: true
+  vars:
+    postgres_user: ghrunner
+    postgres_repo_dir: /home/ghrunner/infra-postgres
+    postgres_runner_dir: /home/ghrunner/infra-runner
+    postgres_overlay: ../infra-postgres/deploy/docker-compose.infra-runner.yml
+    postgres_cert_identity: https://github.com/uye-ltd/infra-postgres/.github/workflows/ci.yml@refs/heads/main
+  tasks:
+    - name: Clone or fast-forward infra-postgres
+      ansible.builtin.git:
+        repo: https://github.com/uye-ltd/infra-postgres.git
+        dest: "{{ postgres_repo_dir }}"
+        version: main
+        update: true
+      become: true
+      become_user: "{{ postgres_user }}"
+
+    - name: Check the checkout has the env-secret release
+      ansible.builtin.stat:
+        path: "{{ postgres_repo_dir }}/scripts/seed-tenant.sh"
+      register: postgres_seed_script
+
+    - name: Check the obsolete init image is absent
+      ansible.builtin.stat:
+        path: "{{ postgres_repo_dir }}/docker/postgres-init"
+      register: postgres_old_init
+
+    - name: Require the new release before any service changes
+      ansible.builtin.assert:
+        that:
+          - postgres_seed_script.stat.isreg | default(false)
+          - not postgres_old_init.stat.exists
+        fail_msg: Publish and merge the env-secret infra-postgres release first
+
+    - name: Verify the signed Postgres image from the CI identity
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - infra-runner-deployer-1
+          - cosign
+          - verify
+          - --certificate-identity
+          - "{{ postgres_cert_identity }}"
+          - --certificate-oidc-issuer
+          - https://token.actions.githubusercontent.com
+          - ghcr.io/uye-ltd/postgres:latest
+      changed_when: false
+
+    - name: Verify the signed backup image from the CI identity
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - infra-runner-deployer-1
+          - cosign
+          - verify
+          - --certificate-identity
+          - "{{ postgres_cert_identity }}"
+          - --certificate-oidc-issuer
+          - https://token.actions.githubusercontent.com
+          - ghcr.io/uye-ltd/pg-backup:latest
+      changed_when: false
+
+    - name: Check whether the server-only environment already exists
+      ansible.builtin.stat:
+        path: "{{ postgres_repo_dir }}/docker/.env"
+      register: postgres_env_before
+
+    - name: Bootstrap the server-only database secrets
+      ansible.builtin.command:
+        argv: [bash, scripts/bootstrap.sh]
+        chdir: "{{ postgres_repo_dir }}"
+      become: true
+      become_user: "{{ postgres_user }}"
+      changed_when: not postgres_env_before.stat.exists
+      no_log: true
+
+    - name: Let only ghrunner and the deployer group read database secrets
+      ansible.builtin.file:
+        path: "{{ postgres_repo_dir }}/docker/.env"
+        owner: "{{ postgres_user }}"
+        group: "{{ postgres_user }}"
+        mode: "0640"
+
+    - name: Get the numeric ghrunner group ID for the deployer
+      ansible.builtin.command:
+        argv: [id, -g, "{{ postgres_user }}"]
+      register: postgres_group_id
+      changed_when: false
+
+    - name: Validate the database Compose file with the real secret source
+      ansible.builtin.command:
+        argv: [docker, compose, -f, "{{ postgres_repo_dir }}/docker/docker-compose.yml", config, --quiet]
+        chdir: "{{ postgres_repo_dir }}"
+      become: true
+      become_user: "{{ postgres_user }}"
+      changed_when: false
+
+    - name: Read the runner's current Compose file list
+      ansible.builtin.command:
+        argv: [sed, -n, 's/^COMPOSE_FILE=//p', "{{ postgres_runner_dir }}/.env"]
+      register: postgres_compose_file_result
+      changed_when: false
+
+    - name: Require an explicit, unambiguous runner Compose file list
+      ansible.builtin.assert:
+        that:
+          - postgres_compose_file_result.stdout_lines | length == 1
+          - "'docker-compose.yml' in postgres_compose_file_result.stdout.split(':')"
+        fail_msg: Runner COMPOSE_FILE is missing or ambiguous; preserve its existing overlays manually
+
+    - name: Calculate the Compose list with Postgres registered once
+      ansible.builtin.set_fact:
+        postgres_previous_compose_file: "{{ postgres_compose_file_result.stdout }}"
+        postgres_new_compose_file: >-
+          {{ (postgres_compose_file_result.stdout.split(':') + [postgres_overlay]) | unique | join(':') }}
+
+    - name: Register Postgres while preserving every other plugin
+      block:
+        - name: Set the host checkout path for the tenant hook
+          ansible.builtin.lineinfile:
+            path: "{{ postgres_runner_dir }}/.env"
+            regexp: '^POSTGRES_COMPOSE_DIR='
+            line: "POSTGRES_COMPOSE_DIR={{ postgres_repo_dir }}"
+          register: postgres_path_setting
+
+        - name: Set the shared Postgres network name
+          ansible.builtin.lineinfile:
+            path: "{{ postgres_runner_dir }}/.env"
+            regexp: '^POSTGRES_NET='
+            line: POSTGRES_NET=postgres-net
+          register: postgres_net_setting
+
+        - name: Give the capability-limited deployer the secret file's group
+          ansible.builtin.lineinfile:
+            path: "{{ postgres_runner_dir }}/.env"
+            regexp: '^POSTGRES_SECRETS_GID='
+            line: "POSTGRES_SECRETS_GID={{ postgres_group_id.stdout }}"
+          register: postgres_gid_setting
+
+        - name: Append the Postgres overlay without replacing existing overlays
+          ansible.builtin.lineinfile:
+            path: "{{ postgres_runner_dir }}/.env"
+            regexp: '^COMPOSE_FILE='
+            line: "COMPOSE_FILE={{ postgres_new_compose_file }}"
+          register: postgres_overlay_setting
+
+        - name: Validate the combined runner Compose configuration
+          ansible.builtin.command:
+            argv: [docker, compose, config, --quiet]
+            chdir: "{{ postgres_runner_dir }}"
+          become: true
+          become_user: "{{ postgres_user }}"
+          changed_when: false
+
+        - name: Recreate the deployer with the new plugin mounts and group
+          ansible.builtin.command:
+            argv: [docker, compose, up, -d, --no-deps, deployer]
+            chdir: "{{ postgres_runner_dir }}"
+          become: true
+          become_user: "{{ postgres_user }}"
+          changed_when: true
+          when: >-
+            postgres_path_setting.changed or postgres_net_setting.changed or
+            postgres_gid_setting.changed or postgres_overlay_setting.changed
+
+      rescue:
+        - name: Restore the previous runner Compose file list
+          ansible.builtin.lineinfile:
+            path: "{{ postgres_runner_dir }}/.env"
+            regexp: '^COMPOSE_FILE='
+            line: "COMPOSE_FILE={{ postgres_previous_compose_file }}"
+
+        - name: Restore the deployer with its previous plugin mounts
+          ansible.builtin.command:
+            argv: [docker, compose, up, -d, --no-deps, deployer]
+            chdir: "{{ postgres_runner_dir }}"
+          become: true
+          become_user: "{{ postgres_user }}"
+          changed_when: true
+
+        - name: Report that Postgres registration did not complete
+          ansible.builtin.fail:
+            msg: Postgres registration failed; the previous runner overlay list was restored
+
+    # A deployed plugin that fails health must stay registered so /health remains 503.
+    # Rolling the mount back at this point would hide the incident and leave Postgres unmanaged.
+    - name: Wait for the deployer and both new plugins to become healthy
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/health
+        status_code: 200
+        timeout: 5
+      register: postgres_deployer_health
+      until: postgres_deployer_health.status | default(0) == 200
+      retries: 50
+      delay: 5
+
+    - name: Take an initial backup through the running sidecar
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - infra-postgres
+          - --project-directory
+          - "{{ postgres_repo_dir }}/docker"
+          - exec
+          - -T
+          - postgres-backup
+          - /backup.sh
+      become: true
+      become_user: "{{ postgres_user }}"
+      changed_when: true
+
+    - name: Find completed backup runs
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - infra-postgres
+          - --project-directory
+          - "{{ postgres_repo_dir }}/docker"
+          - exec
+          - -T
+          - postgres-backup
+          - find
+          - /backups
+          - -name
+          - complete
+          - -type
+          - f
+      become: true
+      become_user: "{{ postgres_user }}"
+      register: postgres_backup_runs
+      changed_when: false
+
+    - name: Require at least one complete backup
+      ansible.builtin.assert:
+        that: postgres_backup_runs.stdout | trim | length > 0
+        fail_msg: Initial backup did not produce a complete run
+
+    - name: Keep the Postgres checkout current for descriptors and hooks
+      ansible.builtin.cron:
+        name: infra-postgres checkout update
+        user: "{{ postgres_user }}"
+        minute: '*/5'
+        job: "git -C {{ postgres_repo_dir }} pull --ff-only origin main"

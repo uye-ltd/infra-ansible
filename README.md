@@ -212,6 +212,10 @@ ansible-playbook -i inventory/hosts.yml playbooks/storage.yml
 # Prepare the server for the self-hosted GitHub Actions runner (set RUNNER_GITHUB_TOKEN first)
 ansible-playbook -i inventory/hosts.yml playbooks/runner.yml
 
+# After infra-postgres is merged, signed and public in GHCR, register its two plugins,
+# create the server-only secrets, and verify an initial backup.
+ansible-playbook -i inventory/hosts.yml playbooks/postgres.yml
+
 # Run everything at once (requires secrets/wireguard.yml)
 ansible-playbook -i inventory/hosts.yml playbooks/site.yml
 ```
