@@ -7,6 +7,7 @@
     postgres_repo_dir: /home/ghrunner/infra-postgres
     postgres_runner_dir: /home/ghrunner/infra-runner
     postgres_overlay: ../infra-postgres/deploy/docker-compose.infra-runner.yml
+    postgres_secrets_group: infra-postgres-secrets
     postgres_cert_identity: https://github.com/uye-ltd/infra-postgres/.github/workflows/ci.yml@refs/heads/main
   tasks:
     - name: Clone or fast-forward infra-postgres
@@ -65,6 +66,18 @@
           - ghcr.io/uye-ltd/pg-backup:latest
       changed_when: false
 
+    - name: Create a group used only for the Postgres secret file
+      ansible.builtin.group:
+        name: "{{ postgres_secrets_group }}"
+        system: true
+
+    - name: Make atomic secret replacements inherit the dedicated group
+      ansible.builtin.file:
+        path: "{{ postgres_repo_dir }}/docker"
+        owner: "{{ postgres_user }}"
+        group: "{{ postgres_secrets_group }}"
+        mode: "2750"
+
     - name: Check whether the server-only environment already exists
       ansible.builtin.stat:
         path: "{{ postgres_repo_dir }}/docker/.env"
@@ -79,16 +92,16 @@
       changed_when: not postgres_env_before.stat.exists
       no_log: true
 
-    - name: Let only ghrunner and the deployer group read database secrets
+    - name: Let only ghrunner and the dedicated deployer group read database secrets
       ansible.builtin.file:
         path: "{{ postgres_repo_dir }}/docker/.env"
         owner: "{{ postgres_user }}"
-        group: "{{ postgres_user }}"
+        group: "{{ postgres_secrets_group }}"
         mode: "0640"
 
-    - name: Get the numeric ghrunner group ID for the deployer
+    - name: Get the numeric dedicated group ID for the deployer
       ansible.builtin.command:
-        argv: [id, -g, "{{ postgres_user }}"]
+        argv: [getent, group, "{{ postgres_secrets_group }}"]
       register: postgres_group_id
       changed_when: false
 
@@ -139,7 +152,7 @@
           ansible.builtin.lineinfile:
             path: "{{ postgres_runner_dir }}/.env"
             regexp: '^POSTGRES_SECRETS_GID='
-            line: "POSTGRES_SECRETS_GID={{ postgres_group_id.stdout }}"
+            line: "POSTGRES_SECRETS_GID={{ postgres_group_id.stdout.split(':')[2] }}"
           register: postgres_gid_setting
 
         - name: Append the Postgres overlay without replacing existing overlays
@@ -189,6 +202,11 @@
 
     # A deployed plugin that fails health must stay registered so /health remains 503.
     # Rolling the mount back at this point would hide the incident and leave Postgres unmanaged.
+    - name: Confirm the capability-limited deployer can read the secret file
+      ansible.builtin.command:
+        argv: [docker, exec, infra-runner-deployer-1, test, -r, /workspace-postgres/docker/.env]
+      changed_when: false
+
     - name: Wait for the deployer and both new plugins to become healthy
       ansible.builtin.uri:
         url: http://127.0.0.1:8080/health
